@@ -1,0 +1,32 @@
+import { Mastra } from '@mastra/core/mastra';
+import { PinoLogger } from '@mastra/loggers';
+import { LibSQLStore } from '@mastra/libsql';
+import { luviaWorkflow } from './workflows/luvia-workflow';
+import {
+  salesAgent,
+  supportAgent,
+  clarificationAgent,
+} from './agents/sales-support-agents';
+import { docsAgent } from './agents/docs-agent';
+
+export const mastra = new Mastra({
+  workflows: { luviaWorkflow },
+  agents: {
+    salesAgent,
+    supportAgent,
+    clarificationAgent,
+    docsAgent,
+  },
+  storage: new LibSQLStore({
+    // stores observability, scores, ... into memory storage, if it needs to persist, change to file:../mastra.db
+    url: ':memory:',
+  }),
+  logger: new PinoLogger({
+    name: 'Mastra',
+    level: 'info',
+  }),
+  observability: {
+    // Enables DefaultExporter and CloudExporter for AI tracing
+    default: { enabled: true },
+  },
+});

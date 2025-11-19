@@ -1,0 +1,40 @@
+{
+  "name": "luvia-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "mastra dev",
+    "build": "mastra build",
+    "start": "mastra start",
+    "dev:chat": "bun src/server.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {
+    "@mastra/core": "^0.24.1",
+    "@mastra/evals": "^0.14.4",
+    "@mastra/libsql": "^0.16.2",
+    "@mastra/loggers": "^0.10.19",
+    "@mastra/memory": "^0.15.11",
+    "express": "^4.21.2",
+    "@qdrant/js-client-rest": "^1.12.0",
+    "@supabase/supabase-js": "^2.49.1",
+    "cohere-ai": "^7.13.2",
+    "openai": "^4.77.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^24.10.1",
+    "ts-node": "^10.9.2",
+    "mastra": "^0.18.1",
+    "typescript": "^5.9.3"
+  }
+}

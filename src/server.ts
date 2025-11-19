@@ -1,0 +1,62 @@
+import express from 'express';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { mastra } from './mastra/index.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(express.json());
+
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { team_id, message, phone, email, user_confirmation } = req.body ?? {};
+
+    if (!team_id || !message) {
+      return res.status(400).json({
+        error: 'team_id and message are required',
+      });
+    }
+
+    const luviaWorkflow = mastra.getWorkflow('luviaWorkflow' as any);
+    const run = await luviaWorkflow.createRunAsync();
+
+    const result = await run.start({
+      inputData: {
+        team_id,
+        message,
+        phone,
+        email,
+        user_confirmation,
+      },
+    });
+
+    if (result.status !== 'success') {
+      return res.status(500).json({
+        workflow_run_id: run.runId,
+        status: result.status,
+        error: result.status === 'failed' ? result.error?.message ?? String(result.error) : 'Workflow did not complete successfully',
+      });
+    }
+
+    return res.json({
+      workflow_run_id: run.runId,
+      ...result.result,
+    });
+  } catch (err: any) {
+    console.error('Error in /api/chat:', err);
+    return res.status(500).json({
+      error: 'Internal server error',
+      details: err?.message ?? String(err),
+    });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`Luvia chat server running at http://localhost:${port}`);
+});
