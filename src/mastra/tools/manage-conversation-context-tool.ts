@@ -6,6 +6,7 @@ import type { ConversationState, ProductHistoryItem } from '../../types/luvia.ty
 
 const memory = new Memory({
   storage: new LibSQLStore({
+    id: 'conversation-context',
     url: 'file:../mastra.db',
   }),
   options: {
@@ -95,8 +96,8 @@ export const manageConversationContext = createTool({
     'Manages conversation context by tracking the current product and product history across turns.',
   inputSchema: manageConversationContextInputSchema,
   outputSchema: manageConversationContextOutputSchema,
-  execute: async ({ context }) => {
-    const { conversation_id, newly_identified_product_id } = context;
+  execute: async (inputData) => {
+    const { conversation_id, newly_identified_product_id } = inputData;
 
     let state = await loadConversationState(conversation_id);
     let contextSwitched = false;

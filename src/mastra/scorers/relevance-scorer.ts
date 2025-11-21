@@ -1,4 +1,5 @@
 import { OpenAI } from 'openai';
+import 'dotenv/config';
 
 export class RelevanceScorer {
   private openai: OpenAI;

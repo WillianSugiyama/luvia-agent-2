@@ -71,8 +71,8 @@ export const validate_security_layer = createTool({
     'Applies initial security guardrails: rate limiting, prompt injection detection, and phone sanitization.',
   inputSchema: securityInputSchema,
   outputSchema: securityOutputSchema,
-  execute: async ({ context }) => {
-    const parsed = securityInputSchema.safeParse(context);
+  execute: async (inputData) => {
+    const parsed = securityInputSchema.safeParse(inputData);
 
     if (!parsed.success) {
       throw new SecurityError('Invalid input schema');

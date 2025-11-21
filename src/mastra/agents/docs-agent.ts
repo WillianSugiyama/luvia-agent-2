@@ -5,12 +5,12 @@ type KnowledgeResult = {
   score: number;
 };
 
-const getKnowledgeFromRuntime = (runtimeContext: any): KnowledgeResult[] => {
-  if (!runtimeContext?.get) {
+const getKnowledgeFromRuntime = (requestContext: any): KnowledgeResult[] => {
+  if (!requestContext?.get) {
     return [];
   }
   try {
-    const results = runtimeContext.get('knowledge_results');
+    const results = requestContext.get('knowledge_results');
     return Array.isArray(results) ? results : [];
   } catch {
     return [];
@@ -19,8 +19,8 @@ const getKnowledgeFromRuntime = (runtimeContext: any): KnowledgeResult[] => {
 
 export const docsAgent = new Agent({
   name: 'docs_agent',
-  instructions: ({ runtimeContext }) => {
-    const knowledge = getKnowledgeFromRuntime(runtimeContext);
+  instructions: ({ requestContext }) => {
+    const knowledge = getKnowledgeFromRuntime(requestContext);
 
     const contextText =
       knowledge.length > 0

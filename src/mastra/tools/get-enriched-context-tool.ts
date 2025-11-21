@@ -8,6 +8,8 @@ import type {
   ProductRuleMetadata,
   SalesFrameworkOutput,
 } from '../../types/luvia.types';
+import { executeWithLogging } from '../utils/supabase-logger';
+import { cosineSimilarity } from '../utils/vector-search';
 
 interface ProductEmbeddingRow {
   metadata: ProductMetadata;
@@ -24,6 +26,24 @@ interface CustomerEventRow {
 let supabaseClient: SupabaseClient | null = null;
 let openaiClient: OpenAI | null = null;
 let qdrantClient: QdrantClient | null = null;
+
+// Helper para logar queries do Supabase com detalhes
+const logSupabaseQuery = async <T>(
+  logger: any,
+  queryName: string,
+  table: string,
+  filters: Record<string, any>,
+  queryFn: () => any
+): Promise<{ data: T | null; error: any }> => {
+  return executeWithLogging<T>(
+    queryName,
+    table,
+    filters,
+    queryFn,
+    logger,
+    { alwaysLogToConsole: true }
+  );
+};
 
 const getSupabaseClient = () => {
   if (!supabaseClient) {
@@ -76,7 +96,8 @@ const getQdrantClient = () => {
 };
 
 const getEnrichedContextInputSchema = z.object({
-  product_id: z.string(),
+  product_id: z.string().optional(),
+  product_name: z.string().optional(),
   team_id: z.string(),
   customer_phone: z.string(),
   user_intent: z.string(),
@@ -106,57 +127,126 @@ const fetchProductMetadata = async (
 ): Promise<ProductMetadata | null> => {
   const supabase = getSupabaseClient();
 
-  if (logger) {
-    logger.info(`Fetching Product Metadata: team_id='${teamId}', product_id='${productId}'`);
-  }
-
-  const { data, error } = await supabase
-    .from('product_embeddings')
-    .select('metadata')
-    .eq('team_id', teamId)
-    .eq('id', productId)
-    .maybeSingle<ProductEmbeddingRow>();
+  const { data, error } = await logSupabaseQuery<ProductEmbeddingRow>(
+    logger,
+    'fetchProductMetadata',
+    'product_embeddings',
+    { team_id: teamId, product_id: productId },
+    () => supabase
+      .from('product_embeddings')
+      .select('metadata')
+      .eq('team_id', teamId)
+      .eq('product_id', productId)
+      .maybeSingle<ProductEmbeddingRow>()
+  );
 
   if (error) {
-    if (logger) logger.error('Error fetching product metadata', error);
     throw error;
-  }
-
-  if (logger) {
-    logger.info(data ? 'Product Metadata found.' : 'No Product Metadata found.');
   }
 
   return data?.metadata ?? null;
 };
 
+interface ProductEmbeddingSearchRow {
+  metadata: ProductMetadata;
+  embedding: number[];
+}
+
+const searchProductMetadataByName = async (
+  teamId: string,
+  productName: string,
+  logger?: any
+): Promise<ProductMetadata | null> => {
+  const supabase = getSupabaseClient();
+
+  // 1. Generate embedding from product name
+  const embedding = await generateIntentEmbedding(productName, logger);
+
+  // 2. Fetch all product embeddings for this team
+  const { data, error } = await logSupabaseQuery<ProductEmbeddingSearchRow[]>(
+    logger,
+    'searchProductMetadataByName',
+    'product_embeddings',
+    { team_id: teamId },
+    () => supabase
+      .from('product_embeddings')
+      .select('metadata, embedding')
+      .eq('team_id', teamId)
+  );
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data || data.length === 0) {
+    if (logger) {
+      logger.warn(`No products found for team_id: ${teamId}`);
+    }
+    return null;
+  }
+
+  // 3. Calculate similarity and find best match
+  const scored = data.map((row) => {
+    let similarity = 0;
+    if (Array.isArray(row.embedding)) {
+      try {
+        similarity = cosineSimilarity(embedding, row.embedding);
+      } catch (e) {
+        // Ignore dimensionality mismatch
+      }
+    }
+    return {
+      metadata: row.metadata,
+      score: similarity,
+    };
+  });
+
+  // Sort by similarity and get top result
+  scored.sort((a, b) => b.score - a.score);
+  const topMatch = scored[0];
+
+  if (logger) {
+    logger.info(`Product search by name "${productName}" - Top match: ${topMatch?.metadata?.nome ?? 'N/A'} (score: ${topMatch?.score?.toFixed(4) ?? 0})`);
+  }
+
+  // Only return if similarity is above threshold (0.3)
+  if (topMatch && topMatch.score > 0.3) {
+    return topMatch.metadata;
+  }
+
+  if (logger) {
+    logger.warn(`No product found with sufficient similarity for "${productName}" (best score: ${topMatch?.score?.toFixed(4) ?? 0})`);
+  }
+
+  return null;
+};
+
 const fetchProductRules = async (
-  teamId: string, 
+  teamId: string,
   productId: string,
   logger?: any
 ): Promise<string[]> => {
   const supabase = getSupabaseClient();
 
-  if (logger) {
-    logger.info(`Fetching Rules from Supabase: table='product_rule_embeddings', team_id='${teamId}', product_id='${productId}'`);
-  }
-
-  const { data, error } = await supabase
-    .from('product_rule_embeddings')
-    .select('metadata')
-    .eq('team_id', teamId)
-    .eq('product_id', productId);
+  const { data, error } = await logSupabaseQuery<ProductRuleRow[]>(
+    logger,
+    'fetchProductRules',
+    'product_rule_embeddings',
+    { team_id: teamId, product_id: productId },
+    () => supabase
+      .from('product_rule_embeddings')
+      .select('metadata')
+      .eq('team_id', teamId)
+      .eq('product_id', productId)
+  );
 
   if (error) {
-    if (logger) logger.error('Error fetching rules from Supabase', error);
     throw error;
   }
 
-  if (logger) {
-    logger.info(`Supabase returned ${data?.length ?? 0} rule rows.`);
-    if (data && data.length > 0) {
-       // Log the first item to debug structure
-       logger.info({ firstRow: data[0] }, 'First Rule Row Payload');
-    }
+  if (logger && data && data.length > 0) {
+    // Log the first item to debug structure
+    logger.debug(`First Rule Row Payload: ${JSON.stringify(data[0])}`);
   }
 
   const rows = (data ?? []) as ProductRuleRow[];
@@ -183,17 +273,24 @@ const fetchCustomerStatus = async (
   teamId: string,
   customerPhone: string,
   productId: string,
+  logger?: any
 ): Promise<string> => {
   const supabase = getSupabaseClient();
 
-  const { data, error } = await supabase
-    .from('customer_events')
-    .select('event_type')
-    .eq('team_id', teamId)
-    .eq('customer_phone', customerPhone)
-    .eq('product_id', productId)
-    .order('created_at', { ascending: false })
-    .limit(1);
+  const { data, error } = await logSupabaseQuery<CustomerEventRow[]>(
+    logger,
+    'fetchCustomerStatus',
+    'customer_events',
+    { team_id: teamId, customer_phone: customerPhone, product_id: productId },
+    () => supabase
+      .from('customer_events')
+      .select('event_type')
+      .eq('team_id', teamId)
+      .eq('customer_phone', customerPhone)
+      .eq('product_id', productId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+  );
 
   if (error) {
     throw error;
@@ -244,6 +341,7 @@ const buildFallbackSalesStrategy = (userIntent: string, logger?: any) => {
     framework,
     instruction,
     cta_suggested: cta,
+    should_offer: true,
   };
 };
 
@@ -304,7 +402,7 @@ const fetchSalesStrategy = async (userIntent: string, logger?: any) => {
 
     if (logger) {
       logger.info(`Sales Strategy Found: Framework="${framework}"`);
-      logger.debug({ payload: output }, 'Sales Strategy Payload');
+      logger.debug(`Sales Strategy Payload: ${JSON.stringify(output)}`);
     }
 
     return {
@@ -327,18 +425,30 @@ export const get_enriched_context = createTool({
     'Fetches and aggregates product metadata, rules, customer status, and sales framework strategy.',
   inputSchema: getEnrichedContextInputSchema,
   outputSchema: getEnrichedContextOutputSchema,
-  execute: async ({ context, mastra }) => {
-    const { product_id, team_id, customer_phone, user_intent } = context;
-    const logger = mastra?.logger;
+  execute: async (inputData, context) => {
+    const { product_id, product_name, team_id, customer_phone, user_intent } = inputData;
+    const logger = context?.mastra?.logger;
 
     if (logger) {
-      logger.info(`Enriching context for Product: ${product_id}, Team: ${team_id}`);
+      logger.info(`Enriching context for Product: ${product_id ?? product_name ?? 'N/A'}, Team: ${team_id}`);
     }
 
-    const [productMetadata, rules, customerStatus, salesStrategy] = await Promise.all([
-      fetchProductMetadata(team_id, product_id, logger),
-      fetchProductRules(team_id, product_id, logger),
-      fetchCustomerStatus(team_id, customer_phone, product_id),
+    // Determine product metadata based on available input
+    let productMetadata: ProductMetadata | null = null;
+
+    if (product_id) {
+      // Use direct ID lookup
+      productMetadata = await fetchProductMetadata(team_id, product_id, logger);
+    } else if (product_name) {
+      // Use vector similarity search by name
+      productMetadata = await searchProductMetadataByName(team_id, product_name, logger);
+    }
+
+    // Fetch other data in parallel (using product_id if available, otherwise skip product-specific queries)
+    const resolvedProductId = product_id ?? '';
+    const [rules, customerStatus, salesStrategy] = await Promise.all([
+      resolvedProductId ? fetchProductRules(team_id, resolvedProductId, logger) : Promise.resolve([]),
+      resolvedProductId ? fetchCustomerStatus(team_id, customer_phone, resolvedProductId, logger) : Promise.resolve('UNKNOWN'),
       fetchSalesStrategy(user_intent, logger),
     ]);
 
@@ -362,11 +472,7 @@ export const get_enriched_context = createTool({
         upperCheckout.includes('LINK AQUI');
 
     if ((!rawCheckout || isPlaceholder) && logger) {
-      logger.error({ 
-        product_id, 
-        team_id, 
-        raw_link: rawCheckout 
-      }, 'CRITICAL: Valid checkout link not found for product.');
+      logger.error(`CRITICAL: Valid checkout link not found for product - product_id: ${product_id ?? 'N/A'}, product_name: ${product_name ?? 'N/A'}, team_id: ${team_id}, raw_link: ${rawCheckout}`);
     }
 
     const checkout_link =

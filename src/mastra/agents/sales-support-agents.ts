@@ -17,13 +17,13 @@ type EnrichedContext = {
   };
 };
 
-const getEnrichedContextFromRuntime = (runtimeContext: any): EnrichedContext | null => {
-  if (!runtimeContext?.get) {
+const getEnrichedContextFromRuntime = (requestContext: any): EnrichedContext | null => {
+  if (!requestContext?.get) {
     return null;
   }
 
   try {
-    const context = runtimeContext.get<EnrichedContext>('enriched_context');
+    const context = requestContext.get('enriched_context') as EnrichedContext | undefined;
     return context ?? null;
   } catch {
     return null;
@@ -32,8 +32,8 @@ const getEnrichedContextFromRuntime = (runtimeContext: any): EnrichedContext | n
 
 export const salesAgent = new Agent({
   name: 'sales_agent',
-  instructions: ({ runtimeContext }) => {
-    const ctx = getEnrichedContextFromRuntime(runtimeContext);
+  instructions: ({ requestContext }) => {
+    const ctx = getEnrichedContextFromRuntime(requestContext);
 
     const product = ctx?.product ?? {
       name: 'produto',
@@ -97,8 +97,8 @@ Seja persuasivo, mas claro e específico; priorize informações relevantes mesm
 
 export const supportAgent = new Agent({
   name: 'support_agent',
-  instructions: ({ runtimeContext }) => {
-    const ctx = getEnrichedContextFromRuntime(runtimeContext);
+  instructions: ({ requestContext }) => {
+    const ctx = getEnrichedContextFromRuntime(requestContext);
 
     const product = ctx?.product ?? {
       name: 'produto',

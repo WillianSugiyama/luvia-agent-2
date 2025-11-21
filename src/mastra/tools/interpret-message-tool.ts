@@ -39,8 +39,8 @@ export const interpret_user_message = createTool({
     'Interprets a noisy user message in Portuguese and extracts whether it is a clarification response, and which product/course is being referenced.',
   inputSchema: interpretMessageInputSchema,
   outputSchema: interpretMessageOutputSchema,
-  execute: async ({ context }) => {
-    const { message, previous_product_name } = context;
+  execute: async (inputData) => {
+    const { message, previous_product_name } = inputData;
 
     const client = getOpenAIClient();
 
@@ -56,7 +56,10 @@ Sua tarefa é:
 Definições:
 - is_clarification_response: true quando a mensagem parece ser uma resposta a uma pergunta anterior do tipo "qual curso/produto?".
 - has_clear_product: true quando a mensagem deixa razoavelmente claro qual curso/produto é (ex.: "SOS RT", "COMU RT", "Congresso Pendulado Experience").
-- product_name: o nome do curso/produto como o usuário está tentando dizer (texto curto), ou null se não ficar claro.
+- product_name: o nome do curso/produto que o usuário menciona (texto curto), ou null se não ficar claro.
+  - IMPORTANTE: Se o usuário citar explicitamente um nome de produto (ex.: "comprei o curso: Nome do Produto", "curso Livro Digital - Segredos da Radiestesia Terapêutica"), extraia esse nome EXATO e COMPLETO.
+  - Remova apenas prefixos como "comprei", "quero", "curso:", mas mantenha o nome completo do produto.
+  - Exemplo: "comprei o curso: Livro Digital - Segredos da Radiestesia Terapêutica" → product_name: "Livro Digital - Segredos da Radiestesia Terapêutica"
 - normalized_query: uma reformulação curta da intenção para busca (ex.: "trocar do curso SOS RT para COMU RT na Black Friday", "saber preço do curso SOS RT").
 - interaction_type: uma das opções:
   - "support": problemas de acesso, bugs, dúvidas pós-compra, dificuldades técnicas, ansiedade / pedido de ajuda (ex.: "não estou conseguindo acessar a aula", "me ajuda com...").
@@ -143,10 +146,11 @@ Responda APENAS com um JSON do tipo:
         ? parsed.normalized_query
         : message;
     const interactionTypeRaw = typeof parsed.interaction_type === 'string' ? parsed.interaction_type : 'general';
-    const allowedTypes = ['support', 'pricing', 'purchase', 'upgrade', 'refund', 'general'];
-    const interactionType = allowedTypes.includes(interactionTypeRaw)
-      ? (interactionTypeRaw as (typeof allowedTypes)[number])
-      : 'general';
+    const allowedTypes = ['support', 'pricing', 'purchase', 'upgrade', 'refund', 'general'] as const;
+    const interactionType: 'support' | 'pricing' | 'purchase' | 'upgrade' | 'refund' | 'general' =
+      allowedTypes.includes(interactionTypeRaw as any)
+        ? (interactionTypeRaw as 'support' | 'pricing' | 'purchase' | 'upgrade' | 'refund' | 'general')
+        : 'general';
 
     return {
       is_clarification_response: isClarification,

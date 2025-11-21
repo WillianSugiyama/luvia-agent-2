@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mastra } from './mastra/index.js';
+import { mastra } from './mastra/index';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,8 +23,8 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    const luviaWorkflow = mastra.getWorkflow('luviaWorkflow' as any);
-    const run = await luviaWorkflow.createRunAsync();
+    const luviaWorkflow = mastra.getWorkflow('luviaWorkflow');
+    const run = await luviaWorkflow.createRun();
 
     const result = await run.start({
       inputData: {
@@ -40,7 +40,7 @@ app.post('/api/chat', async (req, res) => {
       return res.status(500).json({
         workflow_run_id: run.runId,
         status: result.status,
-        error: result.status === 'failed' ? result.error?.message ?? String(result.error) : 'Workflow did not complete successfully',
+        error: result.status === 'failed' ? (result as any).error?.message ?? String((result as any).error) : 'Workflow did not complete successfully',
       });
     }
 

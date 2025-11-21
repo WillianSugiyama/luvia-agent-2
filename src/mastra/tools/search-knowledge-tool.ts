@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { cosineSimilarity } from '../utils/vector-search';
+import { executeWithLogging } from '../utils/supabase-logger';
 
 interface ProductRuleRow {
   metadata: { rules?: string[]; rule?: string; content?: string };
@@ -82,9 +83,12 @@ export const search_knowledge_tool = createTool({
   description: 'Searches product knowledge base/rules using vector similarity.',
   inputSchema: searchKnowledgeInputSchema,
   outputSchema: searchKnowledgeOutputSchema,
-  execute: async ({ context, mastra }) => {
-    const { query, product_id, team_id } = context;
-    const logger = mastra?.logger;
+  execute: async (inputData, context) => {
+    const { query, product_id, team_id } = inputData;
+    const logger = context?.mastra?.logger;
+
+    // Log sempre no console
+    console.log(`\x1b[36m[Supabase]\x1b[0m Searching knowledge for product ${product_id}, query: "${query}"`);
 
     if (logger) {
       logger.info(`Searching knowledge for product ${product_id}, query: "${query}"`);
@@ -94,28 +98,25 @@ export const search_knowledge_tool = createTool({
     const supabase = getSupabaseClient();
 
     // Fetch all rules/embeddings for this product
-    const { data, error } = await supabase
-      .from('product_rule_embeddings')
-      .select('metadata, embedding')
-      .eq('team_id', team_id)
-      .eq('product_id', product_id);
+    const { data, error } = await executeWithLogging<any[]>(
+      'searchKnowledge',
+      'product_rule_embeddings',
+      { team_id, product_id },
+      async () => await supabase
+        .from('product_rule_embeddings')
+        .select('metadata, embedding')
+        .eq('team_id', team_id)
+        .eq('product_id', product_id),
+      logger,
+      { alwaysLogToConsole: true }
+    );
 
     if (error) {
-      if (logger) {
-        logger.error('Error fetching product rules', error);
-      }
       throw error;
     }
 
     if (!data || data.length === 0) {
-      if (logger) {
-        logger.info('No knowledge found for this product.');
-      }
       return { results: [] };
-    }
-
-    if (logger) {
-      logger.info(`Fetched ${data.length} knowledge chunks. Calculating similarity...`);
     }
 
     const scored = (data as any[]).map((row: any) => {

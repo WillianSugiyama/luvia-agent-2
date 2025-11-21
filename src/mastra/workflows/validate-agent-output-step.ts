@@ -194,11 +194,9 @@ export const validate_agent_output = createStep({
               content: `Não foi possível validar a resposta anterior para a seguinte pergunta do usuário. Forneça uma resposta segura dizendo que não sabe a resposta com confiança, sem inventar detalhes.\n\nQUERY:\n${original_query}`,
             },
           ],
-          { format: 'mastra' },
         );
 
-        const fullOutput = await result.getFullOutput();
-        const safeText = fullOutput.text ?? '';
+        const safeText = result.text ?? '';
 
         if (safeText.trim()) {
           finalResponse = safeText.trim();
