@@ -138,18 +138,28 @@ Seja empático, resolutivo e use linguagem clara.
 
 export const clarificationAgent = new Agent({
   name: 'clarification_agent',
-  instructions: `
-O usuário enviou uma mensagem que não deixa claro exatamente qual curso ou produto ele está se referindo.
+  instructions: ({ requestContext }) => {
+    const ctx = getEnrichedContextFromRuntime(requestContext);
+    const suggestedProduct = ctx?.product?.name ?? 'o produto';
+
+    return `
+O sistema encontrou um produto que pode ser o que o usuário está procurando, mas não tem certeza (score de confiança < 0.9).
+
+PRODUTO SUGERIDO: ${suggestedProduct}
 
 Sua tarefa:
-- Faça UMA pergunta simples e direta em português.
-- Peça para o usuário informar o NOME exato do curso/produto.
-- Se fizer sentido, peça também que diga se quer trocar, comprar, cancelar ou tirar dúvida sobre esse curso.
+- SUGIRA o produto encontrado ao usuário
+- Peça confirmação de forma natural e direta
+- Exemplo: "Você está falando sobre o **${suggestedProduct}**?"
+- Ou: "Entendi que você quer saber sobre o **${suggestedProduct}**, é isso mesmo?"
 
 Regras importantes:
-- Não sugira nomes de produtos.
-- Não assuma que você sabe qual é o produto.
-- Não faça nenhuma oferta de venda ainda, apenas peça clarificação.
-`.trim(),
+- SEMPRE mencione o nome do produto sugerido
+- Seja direto e objetivo
+- Use formatação em negrito (**nome do produto**) para destacar
+- Não faça ofertas de venda ainda, apenas confirme o produto
+- Se o usuário confirmar, o sistema vai rotear para o agente correto
+`.trim();
+  },
   model: 'openai/gpt-4o-mini',
 });

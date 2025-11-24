@@ -149,13 +149,30 @@ const fetchProductCandidates = async (
   const scoredCandidates = data
     .map((row: any) => {
       let similarity = 0;
-      if (Array.isArray(row.embedding)) {
+      let embeddingVector = row.embedding;
+
+      // Parse embedding if it's a string (Supabase returns pgvector as string)
+      if (typeof embeddingVector === 'string') {
         try {
-          similarity = cosineSimilarity(embedding, row.embedding);
+          // Remove brackets and split by comma
+          embeddingVector = embeddingVector
+            .replace(/^\[/, '')
+            .replace(/\]$/, '')
+            .split(',')
+            .map((v: string) => parseFloat(v.trim()));
         } catch (e) {
-          // Ignore dimensionality mismatch errors
+          console.warn(`\x1b[33m[AdvancedProductSearch]\x1b[0m Failed to parse embedding string for product ${row.product_id}`);
         }
       }
+
+      if (Array.isArray(embeddingVector) && embeddingVector.length === embedding.length) {
+        try {
+          similarity = cosineSimilarity(embedding, embeddingVector);
+        } catch (e) {
+          console.warn(`\x1b[33m[AdvancedProductSearch]\x1b[0m Similarity calculation failed for product ${row.product_id}:`, e);
+        }
+      }
+
       return {
         product_id: row.product_id,
         metadata: row.metadata,
@@ -178,22 +195,20 @@ const fetchRecentProductsForCustomer = async (teamId: string, customerPhone?: st
   }
 
   const supabase = getSupabaseClient();
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const startTime = Date.now();
 
-  const sql = `SELECT product_id FROM customer_events WHERE team_id = '${teamId}' AND customer_phone = '${customerPhone}' AND created_at > '${sevenDaysAgo}'`;
-  console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m Fetching recent products for customer=${customerPhone}`);
+  const sql = `SELECT product_id FROM customer_events WHERE team_id = '${teamId}' AND customer_phone = '${customerPhone}'`;
+  console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m Fetching ALL customer products for customer=${customerPhone}`);
   console.log(`\x1b[90m[SQL]\x1b[0m ${sql}`);
   if (logger) {
-    logger.info(`[Supabase] Executing query: fetchRecentProductsForCustomer - team_id: ${teamId}, customer_phone: ${customerPhone}`);
+    logger.info(`[Supabase] Executing query: fetchAllProductsForCustomer - team_id: ${teamId}, customer_phone: ${customerPhone}`);
   }
 
   const { data, error } = await supabase
     .from('customer_events')
     .select('product_id')
     .eq('team_id', teamId)
-    .eq('customer_phone', customerPhone)
-    .gt('created_at', sevenDaysAgo);
+    .eq('customer_phone', customerPhone);
 
   const duration = Date.now() - startTime;
 
@@ -207,9 +222,9 @@ const fetchRecentProductsForCustomer = async (teamId: string, customerPhone?: st
 
   const rows = (data ?? []) as CustomerEventRow[];
 
-  console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m fetchRecentProducts OK: ${rows.length} events | ${duration}ms`);
+  console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m fetchAllCustomerProducts OK: ${rows.length} events | ${duration}ms`);
   if (logger) {
-    logger.info(`[Supabase] Query completed: fetchRecentProductsForCustomer - ${rows.length} rows, ${duration}ms`);
+    logger.info(`[Supabase] Query completed: fetchAllProductsForCustomer - ${rows.length} rows, ${duration}ms`);
   }
 
   return new Set(rows.map((row) => row.product_id));
@@ -276,10 +291,14 @@ const rerankCandidates = async (
   const boosted = scored.map(({ candidate, score }) => {
     let finalScore = score;
 
-    if (recentProductIds.has(candidate.product_id)) {
+    // Match usando product_id_plataforma da metadata (usado em customer_events)
+    // Try both field names (produto_plataforma_id is the correct one in DB)
+    const platformProductId = (candidate.metadata as any).produto_plataforma_id || candidate.metadata.product_id_plataforma;
+
+    if (platformProductId && recentProductIds.has(platformProductId)) {
       finalScore += 0.15;
       if (logger) {
-        logger.info(`Boosted score for recently viewed product: ${candidate.metadata.nome}`);
+        logger.info(`Boosted score for customer's product: ${candidate.metadata.nome} (platform_id: ${platformProductId})`);
       }
     }
 

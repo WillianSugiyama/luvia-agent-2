@@ -3,12 +3,16 @@ import { z } from 'zod';
 import { inputSchema as luviaInputSchema } from '../../schemas/input.schema';
 import { validate_security_layer } from '../tools/security-tool';
 import { advanced_product_search } from '../tools/advanced-product-search-tool';
-import { manageConversationContext, loadConversationState } from '../tools/manage-conversation-context-tool';
+import { manageConversationContext, loadConversationState, updatePurchasedProducts, setActiveSupportProduct, setPendingContextSwitch } from '../tools/manage-conversation-context-tool';
 import { get_enriched_context } from '../tools/get-enriched-context-tool';
 import { interpret_user_message } from '../tools/interpret-message-tool';
 import { detect_pii_tool } from '../tools/detect-pii-tool';
 import { validate_promises_tool } from '../tools/validate-promises-tool';
 import { escalate_to_human_tool } from '../tools/escalate-to-human-tool';
+import { greeting_handler } from '../tools/greeting-handler-tool';
+import { fetch_customer_purchases } from '../tools/fetch-customer-purchases-tool';
+import { multi_product_clarification } from '../tools/multi-product-clarification-tool';
+import { fetch_customer_products } from '../tools/fetch-customer-products-tool';
 import { relevanceScorer } from '../scorers/relevance-scorer';
 
 // Schema intermediário para passar dados entre steps
@@ -44,6 +48,9 @@ const enrichedContextSchema = z.object({
     has_clear_product: z.boolean(),
     normalized_query: z.string().optional(),
   }),
+  // Multi-product clarification flag
+  needs_multi_product_clarification: z.boolean().optional(),
+  multi_product_clarification_message: z.string().optional(),
 });
 
 const deepAgentOutputSchema = z.object({
@@ -96,10 +103,59 @@ const security_and_enrich_step = createStep({
       logger.info(`[Step 1] Security passed - conversationId: ${conversationId}`);
     }
 
-    // 2. Load Previous State
+    // 2. Check for greetings (early return if detected)
+    const greetingResult = await greeting_handler.execute(
+      { message: safeMessage, team_id },
+      { requestContext, mastra }
+    ) as { is_greeting: boolean; team_name?: string; response?: string };
+
+    if (greetingResult.is_greeting && greetingResult.response) {
+      console.log(`[Step 1] Greeting detected - returning welcome message`);
+      if (logger) {
+        logger.info(`[Step 1] Greeting detected for team ${greetingResult.team_name}`);
+      }
+
+      // Return a minimal enriched context with the greeting response
+      // We'll use a dummy product_id since it's required by schema
+      return {
+        original_message: message,
+        sanitized_message: safeMessage,
+        conversation_id: conversationId,
+        team_id,
+        customer_phone: sanitizedPhone,
+        customer_email: email,
+        product_id: 'greeting-response',
+        product_name: 'Saudação',
+        enriched_context: {
+          product: {
+            name: 'Saudação',
+            price: '',
+            checkout_link: '',
+            description: greetingResult.response,
+          },
+          customer_status: 'new',
+          rules: [],
+          sales_strategy: {
+            framework: 'greeting',
+            instruction: greetingResult.response,
+            cta_suggested: '',
+            should_offer: false,
+          },
+        },
+        is_ambiguous: false,
+        needs_confirmation: false,
+        intent: {
+          interaction_type: 'greeting',
+          has_clear_product: false,
+          normalized_query: safeMessage,
+        },
+      };
+    }
+
+    // 3. Load Previous State
     const previousState = await loadConversationState(conversationId);
 
-    // 3. Interpret Intent
+    // 4. Interpret Intent
     const intent = await interpret_user_message.execute(
       {
         message: safeMessage,
@@ -111,42 +167,158 @@ const security_and_enrich_step = createStep({
     console.log(`[Step 1] User message: "${safeMessage}"`);
     console.log(`[Step 1] Intent interpreted - type: ${intent.interaction_type}, has_clear_product: ${intent.has_clear_product}, product_name: "${intent.product_name}"`);
 
-    // 4. Product Search
-    // Usar product_name extraído pela LLM quando disponível (mais preciso para embedding)
-    const messageForSearch = intent.product_name || intent.normalized_query || safeMessage;
-    console.log(`[Step 1] Search query: "${messageForSearch}"`);
-    const productSearchResult = await advanced_product_search.execute(
-      {
-        message: messageForSearch,
-        team_id,
-        customer_phone: sanitizedPhone,
-      },
-      { requestContext, mastra }
-    ) as { best_match: { product_id: string; name: string; score: number }; is_ambiguous: boolean; needs_confirmation: boolean; alternatives: any[] };
+    // 5. Check Customer Products FIRST (before embedding search)
+    let customerProducts: any[] = [];
+    let shouldSkipEmbeddingSearch = false;
+    let earlyReturnForProductSelection: any = null;
+    let preSelectedProduct: { product_id: string; product_name: string } | null = null;
 
-    let { best_match, is_ambiguous, needs_confirmation } = productSearchResult;
+    if (sanitizedPhone && !user_confirmation) {
+      console.log(`[Step 5] Checking customer products for phone: ${sanitizedPhone}`);
 
-    // Resolve ambiguity based on context
-    const hasPreviousProduct = !!previousState?.current_product_id;
-    const isShortFollowUp =
-      safeMessage.length <= 60 &&
-      !/\b(curso|produto|congresso|treinamento)\b/i.test(safeMessage) &&
-      !/\b(outro|outra|nao e|não é)\b/i.test(safeMessage);
+      const customerProductsResult = await fetch_customer_products.execute(
+        { team_id, customer_phone: sanitizedPhone },
+        { requestContext, mastra }
+      ) as { has_products: boolean; products: any[]; total_count: number };
 
-    if (hasPreviousProduct && isShortFollowUp) {
+      customerProducts = customerProductsResult.products;
+
+      if (customerProductsResult.has_products && customerProducts.length > 0) {
+        console.log(`[Step 5] Customer has ${customerProducts.length} product(s)`);
+
+        // Only ask for product selection if intent is support/general
+        const isSeekingSupport = intent.interaction_type === 'support' || intent.interaction_type === 'general';
+
+        if (isSeekingSupport && !previousState?.active_support_product_id) {
+          // Case 1: Customer has exactly 1 product - auto-select it and continue to enrichment
+          if (customerProducts.length === 1) {
+            const singleProduct = customerProducts[0];
+            console.log(`[Step 5] Customer has 1 product - auto-selecting: "${singleProduct.product_name}" (UUID: ${singleProduct.product_id})`);
+
+            preSelectedProduct = {
+              product_id: singleProduct.product_id,
+              product_name: singleProduct.product_name,
+            };
+
+            shouldSkipEmbeddingSearch = true;
+            console.log(`[Step 5] Skipping embedding search - will use customer's product directly`);
+          }
+          // Case 2: Customer has 2+ products - ask which one
+          else {
+            console.log(`[Step 5] Customer has ${customerProducts.length} products - needs clarification`);
+
+            // Build clarification message listing customer's products
+            const productsList = customerProducts
+              .map((p, i) => `${i + 1}. **${p.product_name}** (${p.event_type === 'APPROVED' ? 'Aprovado' : p.event_type === 'ABANDONED' ? 'Carrinho Abandonado' : 'Reembolsado'})`)
+              .join('\n');
+
+            const clarificationMessage = `Olá! Vi que você tem os seguintes produtos:\n\n${productsList}\n\nSobre qual produto você gostaria de falar? 😊`;
+
+            // Early return with clarification
+            earlyReturnForProductSelection = {
+              original_message: message,
+              sanitized_message: safeMessage,
+              conversation_id: conversationId,
+              team_id,
+              customer_phone: sanitizedPhone,
+              customer_email: email,
+              product_id: '',
+              product_name: '',
+              enriched_context: {
+                product: { name: '', price: '', checkout_link: '' },
+                customer_status: 'UNKNOWN',
+                rules: [],
+                sales_strategy: {
+                  framework: 'Genérico',
+                  instruction: '',
+                  cta_suggested: '',
+                  should_offer: false,
+                },
+              },
+              is_ambiguous: false,
+              needs_confirmation: false,
+              intent: {
+                interaction_type: intent.interaction_type,
+                has_clear_product: false,
+                normalized_query: intent.normalized_query,
+              },
+              needs_multi_product_clarification: true,
+              multi_product_clarification_message: clarificationMessage,
+            };
+
+            shouldSkipEmbeddingSearch = true;
+          }
+        }
+      } else {
+        console.log(`[Step 5] No customer products found - will proceed to embedding search`);
+      }
+    }
+
+    // If we need to ask which product, return early
+    if (earlyReturnForProductSelection) {
+      console.log(`[Step 5] Early return - asking customer to select from ${customerProducts.length} products`);
+      return earlyReturnForProductSelection;
+    }
+
+    // 6. Product Search (embedding-based, only if not pre-selected from customer products)
+    let best_match: { product_id: string; name: string; score: number };
+    let is_ambiguous = false;
+    let needs_confirmation = false;
+
+    if (preSelectedProduct) {
+      // Use pre-selected product from customer_events (Step 5)
+      console.log(`[Step 6] SKIPPING embedding search - using pre-selected customer product`);
       best_match = {
-        product_id: previousState!.current_product_id!,
-        name: best_match?.name ?? previousState!.current_product_id!,
-        score: 1,
+        product_id: preSelectedProduct.product_id,
+        name: preSelectedProduct.product_name,
+        score: 1.0,
       };
       is_ambiguous = false;
       needs_confirmation = false;
-    } else if (intent.has_clear_product) {
-      is_ambiguous = false;
-      needs_confirmation = false;
+    } else {
+      // No pre-selected product - run embedding search
+      console.log(`[Step 6] Running embedding search`);
+      const messageForSearch = intent.product_name || intent.normalized_query || safeMessage;
+      console.log(`[Step 6] Search query: "${messageForSearch}"`);
+
+      const productSearchResult = await advanced_product_search.execute(
+        {
+          message: messageForSearch,
+          team_id,
+          customer_phone: sanitizedPhone,
+        },
+        { requestContext, mastra }
+      ) as { best_match: { product_id: string; name: string; score: number }; is_ambiguous: boolean; needs_confirmation: boolean; alternatives: any[] };
+
+      best_match = productSearchResult.best_match;
+      is_ambiguous = productSearchResult.is_ambiguous;
+      needs_confirmation = productSearchResult.needs_confirmation;
+
+      // Resolve ambiguity based on context
+      const hasPreviousProduct = !!previousState?.current_product_id;
+      const isShortFollowUp =
+        safeMessage.length <= 60 &&
+        !/\b(curso|produto|congresso|treinamento)\b/i.test(safeMessage) &&
+        !/\b(outro|outra|nao e|não é)\b/i.test(safeMessage);
+
+      if (hasPreviousProduct && isShortFollowUp) {
+        console.log(`[Step 6] Short follow-up detected - using previous product: ${previousState!.current_product_id}`);
+        best_match = {
+          product_id: previousState!.current_product_id!,
+          name: best_match?.name ?? previousState!.current_product_id!,
+          score: 1,
+        };
+        is_ambiguous = false;
+        needs_confirmation = false;
+      } else if (intent.has_clear_product) {
+        console.log(`[Step 6] Clear product in intent - skipping confirmation`);
+        is_ambiguous = false;
+        needs_confirmation = false;
+      }
     }
 
-    // 5. Manage Conversation Context
+    // 7. Manage Conversation Context
+    console.log(`[Step 7] Managing conversation context with product_id: ${best_match.product_id}`);
     const conversationContext = await manageConversationContext.execute(
       {
         conversation_id: conversationId,
@@ -156,8 +328,10 @@ const security_and_enrich_step = createStep({
     ) as unknown as { current_product_id: string; context_switched: boolean; history_summary: string };
 
     const activeProductId = conversationContext.current_product_id;
+    console.log(`[Step 7] Active product_id: ${activeProductId}`);
 
-    // 6. Enrich Context
+    // 8. Enrich Context
+    console.log(`[Step 8] Enriching context for product_id: ${activeProductId}`);
     const enrichedContext = await get_enriched_context.execute(
       {
         product_id: activeProductId,
@@ -168,8 +342,23 @@ const security_and_enrich_step = createStep({
       { requestContext, mastra }
     ) as { product: { name: string; price: string; checkout_link: string; description?: string }; customer_status: string; rules: string[]; sales_strategy: { framework: string; instruction: string; cta_suggested: string; should_offer: boolean } };
 
+    console.log(`[Step 8] ✅ Context enriched - product: "${enrichedContext.product.name}", rules: ${enrichedContext.rules.length}, customer_status: ${enrichedContext.customer_status}`);
+    if (enrichedContext.rules.length > 0) {
+      console.log(`[Step 8] Rules loaded for product "${enrichedContext.product.name}":`);
+      enrichedContext.rules.forEach((rule, i) => {
+        console.log(`[Step 8]   ${i + 1}. ${rule.substring(0, 80)}${rule.length > 80 ? '...' : ''}`);
+      });
+    } else {
+      console.log(`[Step 8] ⚠️  No rules found for product "${enrichedContext.product.name}"`);
+    }
+
     if (logger) {
-      logger.info(`[Step 1] Context enriched - product: ${enrichedContext.product.name}, rules_count: ${enrichedContext.rules.length}, customer_status: ${enrichedContext.customer_status}`);
+      logger.info(`[Step 8] Context enriched - product: ${enrichedContext.product.name}, rules_count: ${enrichedContext.rules.length}, customer_status: ${enrichedContext.customer_status}`);
+    }
+
+    // 9. Update purchased products cache in conversation state (keep for backwards compatibility)
+    if (enrichedContext.customer_purchased_products.length > 0) {
+      await updatePurchasedProducts(conversationId, enrichedContext.customer_purchased_products);
     }
 
     return {
@@ -189,6 +378,8 @@ const security_and_enrich_step = createStep({
         has_clear_product: intent.has_clear_product,
         normalized_query: intent.normalized_query,
       },
+      needs_multi_product_clarification: false,
+      multi_product_clarification_message: undefined,
     };
   },
 });
@@ -209,6 +400,38 @@ const deep_agent_routing_step = createStep({
     // Injetar contexto no requestContext para os sub-agentes
     requestContext.set('enriched_context', inputData.enriched_context);
     requestContext.set('intent', inputData.intent);
+    requestContext.set('team_id', inputData.team_id);
+    requestContext.set('product_id', inputData.product_id);
+
+    // Se for saudação, retorna diretamente a resposta pré-formatada
+    if (inputData.intent.interaction_type === 'greeting') {
+      const greetingResponse = inputData.enriched_context.sales_strategy.instruction;
+
+      if (logger) {
+        logger.info('[Step 2] Returning greeting response directly');
+      }
+
+      return {
+        agent_response: greetingResponse,
+        agent_used: 'greetingHandler',
+        needs_human_escalation: false,
+        context: inputData,
+      };
+    }
+
+    // Se precisa clarificação de múltiplos produtos, retorna mensagem diretamente
+    if (inputData.needs_multi_product_clarification && inputData.multi_product_clarification_message) {
+      if (logger) {
+        logger.info('[Step 2] Returning multi-product clarification message');
+      }
+
+      return {
+        agent_response: inputData.multi_product_clarification_message,
+        agent_used: 'multiProductClarification',
+        needs_human_escalation: false,
+        context: inputData,
+      };
+    }
 
     // Se ambíguo, usa clarificationAgent diretamente
     if (inputData.is_ambiguous || inputData.needs_confirmation) {

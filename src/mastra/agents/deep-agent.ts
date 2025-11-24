@@ -6,6 +6,7 @@ import { LibSQLStore } from '@mastra/libsql';
 import { salesAgent, supportAgent, clarificationAgent } from './sales-support-agents';
 import { docsAgent } from './docs-agent';
 import { dontKnowAgent } from './dont-know-agent';
+import { contextSwitchConfirmationAgent } from './context-switch-confirmation-agent';
 
 // Importar tools
 import { search_knowledge_tool } from '../tools/search-knowledge-tool';
@@ -26,19 +27,51 @@ export const deepAgent = new Agent({
       product?: { name: string; price: string };
       customer_status?: string;
       rules?: string[];
+      customer_purchased_products?: string[];
+      is_multi_product_customer?: boolean;
+      active_product_ownership?: 'APPROVED' | 'REFUND' | 'UNKNOWN';
     } | undefined;
+
+    const intent = requestContext?.get?.('intent') as {
+      interaction_type?: string;
+    } | undefined;
+
+    // Get team_id and product_id from enrichedContext
+    const teamId = requestContext?.get?.('team_id') ?? 'unknown';
+    const productId = requestContext?.get?.('product_id') ?? 'unknown';
 
     const productName = enrichedContext?.product?.name ?? 'Não identificado';
     const customerStatus = enrichedContext?.customer_status ?? 'UNKNOWN';
     const rulesCount = enrichedContext?.rules?.length ?? 0;
 
+    // Multi-product context
+    const purchasedProducts = enrichedContext?.customer_purchased_products ?? [];
+    const isMultiProductCustomer = enrichedContext?.is_multi_product_customer ?? false;
+    const activeProductOwnership = enrichedContext?.active_product_ownership ?? 'UNKNOWN';
+
+    // Pending context switch (from conversation state)
+    const pendingSwitch = requestContext?.get?.('pending_context_switch') as {
+      from_product_name?: string;
+      to_product_name?: string;
+      from_mode?: string;
+      to_mode?: string;
+    } | undefined;
+
     return `
 Você é o DEEP AGENT - o cérebro central do sistema de atendimento.
 
 CONTEXTO ATUAL:
+- Team ID: ${teamId}
+- Product ID: ${productId}
 - Produto: ${productName}
 - Status do Cliente: ${customerStatus}
 - Regras disponíveis: ${rulesCount}
+
+MULTI-PRODUCT CONTEXT:
+- Cliente possui múltiplos produtos: ${isMultiProductCustomer ? 'SIM' : 'NÃO'}
+- Produtos comprados: ${purchasedProducts.length > 0 ? purchasedProducts.join(', ') : 'Nenhum'}
+- Ownership do produto atual: ${activeProductOwnership}
+- Troca de contexto pendente: ${pendingSwitch ? `${pendingSwitch.from_product_name} (${pendingSwitch.from_mode}) → ${pendingSwitch.to_product_name} (${pendingSwitch.to_mode})` : 'Nenhuma'}
 
 SEU PAPEL:
 Você NÃO responde diretamente ao usuário. Você ANALISA e ROTEIA para o agente especializado correto.
@@ -73,9 +106,15 @@ AGENTES DISPONÍVEIS:
    - Não há informação suficiente para responder
    - Pergunta fora do escopo do produto/empresa
 
+6. **contextSwitchConfirmationAgent** - Use quando:
+   - Existe uma troca de contexto pendente (veja "MULTI-PRODUCT CONTEXT")
+   - Usuário respondeu a uma pergunta de confirmação de troca
+   - Precisa interpretar se usuário confirmou, rejeitou ou está indeciso
+
 FERRAMENTAS DISPONÍVEIS:
 
 - **search_knowledge_tool**: Busca semântica na base de conhecimento. USE SEMPRE antes de rotear para docsAgent.
+  PARÂMETROS OBRIGATÓRIOS: query, product_id, team_id (disponível no contexto)
 - **get_enriched_context**: Busca metadados do produto, regras e status do cliente.
 - **advanced_product_search**: Identifica qual produto o cliente está falando.
 - **interpret_user_message**: Classifica a intenção do usuário.
@@ -85,6 +124,11 @@ FERRAMENTAS DISPONÍVEIS:
 
 FLUXO DE DECISÃO:
 
+0. **[PRIORIDADE MÁXIMA]** Se existe troca de contexto pendente:
+   - O usuário acabou de ser perguntado se quer trocar de produto/contexto
+   - Use contextSwitchConfirmationAgent para interpretar a resposta
+   - Baseado na resposta, confirme a troca ou mantenha o contexto atual
+
 1. Se mensagem ambígua sobre produto → clarificationAgent
 2. Se precisa buscar informação → search_knowledge_tool primeiro
    - Se encontrou resultados → docsAgent
@@ -93,11 +137,29 @@ FLUXO DE DECISÃO:
 4. Se cliente novo/ABANDONED → salesAgent
 5. Se não consegue ajudar → dontKnowAgent + escalate_to_human_tool
 
+CONTEXT SWITCHING (Multi-Product Customers):
+
+Se o cliente possui múltiplos produtos (veja "MULTI-PRODUCT CONTEXT"):
+- Produtos comprados mostram o histórico completo
+- Ownership do produto atual indica se ele possui/não possui o produto em questão
+- Se cliente muda de tópico (de suporte para vendas, ou entre produtos diferentes):
+  1. Detecte a mudança de contexto
+  2. Pergunte confirmação ao usuário: "Você quer falar sobre [novo produto] agora?"
+  3. Na próxima mensagem, use contextSwitchConfirmationAgent para interpretar resposta
+
+Regras de Context Switching:
+- Suporte → Vendas de outro produto: SEMPRE perguntar
+- Vendas → Suporte: SEMPRE perguntar
+- Entre produtos diferentes no suporte: SEMPRE perguntar
+- Contexto "sticky": se usuário está em suporte do Produto A, mensagens ambíguas assumem Produto A
+
 IMPORTANTE:
 - SEMPRE use as tools antes de decidir o roteamento
 - NUNCA invente informações
 - Se em dúvida, prefira dontKnowAgent a dar informação errada
 - Passe o contexto enriquecido para o agente escolhido via requestContext
+- Ao chamar search_knowledge_tool, SEMPRE passe team_id e product_id do contexto atual (veja "CONTEXTO ATUAL" acima)
+- Respeite a prioridade: pending context switch > ambiguidade > busca normal
     `.trim();
   },
   model: 'openai/gpt-4o-mini',
@@ -107,6 +169,7 @@ IMPORTANTE:
     docsAgent,
     clarificationAgent,
     dontKnowAgent,
+    contextSwitchConfirmationAgent,
   },
   tools: {
     search_knowledge_tool,

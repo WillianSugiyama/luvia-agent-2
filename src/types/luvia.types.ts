@@ -15,6 +15,8 @@ export interface ProductMetadata {
   link_checkout: string;
   pagina_vendas: string;
   cupom: string | null;
+  product_id_plataforma?: string; // ID do produto na plataforma (Hotmart, etc) - usado para match com customer_events
+  produto_plataforma_id?: string; // Same as above, but with Portuguese field name (actual DB field name)
 }
 
 export interface ProductEmbedding {
@@ -50,10 +52,26 @@ export interface ProductHistoryItem {
   timestamp: number;
 }
 
+export interface PendingContextSwitch {
+  from_product_id: string;
+  from_product_name: string;
+  to_product_id: string;
+  to_product_name: string;
+  from_mode: 'support' | 'sales';
+  to_mode: 'support' | 'sales';
+  timestamp: number;
+}
+
 export interface ConversationState {
   conversation_id: string;
   current_product_id: string | null;
   product_history: ProductHistoryItem[];
   is_confirmed: boolean;
   last_intent: string | null;
+
+  // Multi-product support fields
+  purchased_products: string[];                   // Cache of customer's purchased products
+  active_support_product_id: string | null;       // Product actively being supported
+  support_mode_since: number | null;              // Timestamp when support mode started
+  pending_context_switch: PendingContextSwitch | null; // Pending confirmation for context switch
 }

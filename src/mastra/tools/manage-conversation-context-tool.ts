@@ -88,7 +88,57 @@ const createInitialState = (
   product_history: [],
   is_confirmed: false,
   last_intent: null,
+  purchased_products: [],
+  active_support_product_id: null,
+  support_mode_since: null,
+  pending_context_switch: null,
 });
+
+// Helper: Update purchased products cache
+export const updatePurchasedProducts = async (
+  conversationId: string,
+  purchasedProductIds: string[]
+) => {
+  const state = await loadConversationState(conversationId);
+  if (state) {
+    state.purchased_products = purchasedProductIds;
+    await saveConversationState(conversationId, state);
+  }
+};
+
+// Helper: Set active support product
+export const setActiveSupportProduct = async (
+  conversationId: string,
+  productId: string
+) => {
+  const state = await loadConversationState(conversationId);
+  if (state) {
+    state.active_support_product_id = productId;
+    state.support_mode_since = Date.now();
+    await saveConversationState(conversationId, state);
+  }
+};
+
+// Helper: Set pending context switch
+export const setPendingContextSwitch = async (
+  conversationId: string,
+  pendingSwitch: ConversationState['pending_context_switch']
+) => {
+  const state = await loadConversationState(conversationId);
+  if (state) {
+    state.pending_context_switch = pendingSwitch;
+    await saveConversationState(conversationId, state);
+  }
+};
+
+// Helper: Clear pending context switch
+export const clearPendingContextSwitch = async (conversationId: string) => {
+  const state = await loadConversationState(conversationId);
+  if (state) {
+    state.pending_context_switch = null;
+    await saveConversationState(conversationId, state);
+  }
+};
 
 export const manageConversationContext = createTool({
   id: 'manage_conversation_context',

@@ -118,6 +118,10 @@ const getEnrichedContextOutputSchema = z.object({
     cta_suggested: z.string(),
     should_offer: z.boolean().default(true),
   }),
+  // Multi-product support
+  customer_purchased_products: z.array(z.string()),
+  is_multi_product_customer: z.boolean(),
+  active_product_ownership: z.enum(['APPROVED', 'REFUND', 'UNKNOWN']),
 });
 
 const fetchProductMetadata = async (
@@ -209,13 +213,13 @@ const searchProductMetadataByName = async (
     logger.info(`Product search by name "${productName}" - Top match: ${topMatch?.metadata?.nome ?? 'N/A'} (score: ${topMatch?.score?.toFixed(4) ?? 0})`);
   }
 
-  // Only return if similarity is above threshold (0.3)
-  if (topMatch && topMatch.score > 0.3) {
+  // Only return if similarity is above threshold (0.9 - high confidence required)
+  if (topMatch && topMatch.score > 0.9) {
     return topMatch.metadata;
   }
 
   if (logger) {
-    logger.warn(`No product found with sufficient similarity for "${productName}" (best score: ${topMatch?.score?.toFixed(4) ?? 0})`);
+    logger.warn(`No product found with sufficient similarity for "${productName}" (best score: ${topMatch?.score?.toFixed(4) ?? 0}, threshold: 0.9)`);
   }
 
   return null;
@@ -300,6 +304,54 @@ const fetchCustomerStatus = async (
   const latest = rows[0];
 
   return latest?.event_type ?? 'UNKNOWN';
+};
+
+const fetchCustomerPurchasedProducts = async (
+  teamId: string,
+  customerPhone: string,
+  logger?: any
+): Promise<string[]> => {
+  if (!customerPhone) {
+    return [];
+  }
+
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await logSupabaseQuery<CustomerEventRow[]>(
+    logger,
+    'fetchCustomerPurchasedProducts',
+    'customer_events',
+    { team_id: teamId, customer_phone: customerPhone, event_type: 'APPROVED' },
+    () => supabase
+      .from('customer_events')
+      .select('product_id, event_type')
+      .eq('team_id', teamId)
+      .eq('customer_phone', customerPhone)
+      .in('event_type', ['APPROVED', 'REFUND'])
+      .order('created_at', { ascending: false })
+  );
+
+  if (error) {
+    console.error(`\x1b[31m[GetEnrichedContext]\x1b[0m Error fetching purchased products: ${error.message}`);
+    return [];
+  }
+
+  const rows = (data ?? []) as Array<{ product_id: string; event_type: string }>;
+
+  // Get unique products (latest event per product)
+  const productMap = new Map<string, string>();
+  for (const row of rows) {
+    if (!productMap.has(row.product_id)) {
+      productMap.set(row.product_id, row.event_type);
+    }
+  }
+
+  // Filter only APPROVED (exclude REFUND)
+  const approvedProducts = Array.from(productMap.entries())
+    .filter(([_, eventType]) => eventType === 'APPROVED')
+    .map(([productId, _]) => productId);
+
+  return approvedProducts;
 };
 
 const generateIntentEmbedding = async (userIntent: string, logger?: any) => {
@@ -446,15 +498,28 @@ export const get_enriched_context = createTool({
 
     // Fetch other data in parallel (using product_id if available, otherwise skip product-specific queries)
     const resolvedProductId = product_id ?? '';
-    const [rules, customerStatus, salesStrategy] = await Promise.all([
+    // Try both field names (produto_plataforma_id is the correct one in DB)
+    const platformProductId = (productMetadata as any)?.produto_plataforma_id || productMetadata?.product_id_plataforma || '';
+
+    if (logger && platformProductId) {
+      logger.info(`Using platform_product_id for customer_events lookup: ${platformProductId}`);
+    }
+
+    const [rules, customerStatus, salesStrategy, purchasedProducts] = await Promise.all([
       resolvedProductId ? fetchProductRules(team_id, resolvedProductId, logger) : Promise.resolve([]),
-      resolvedProductId ? fetchCustomerStatus(team_id, customer_phone, resolvedProductId, logger) : Promise.resolve('UNKNOWN'),
+      platformProductId ? fetchCustomerStatus(team_id, customer_phone, platformProductId, logger) : Promise.resolve('UNKNOWN'),
       fetchSalesStrategy(user_intent, logger),
+      fetchCustomerPurchasedProducts(team_id, customer_phone, logger),
     ]);
 
     if (logger) {
-      logger.info(`Fetched ${rules.length} rules and Customer Status: ${customerStatus}`);
+      logger.info(`Fetched ${rules.length} rules, Customer Status: ${customerStatus}, Purchased Products: ${purchasedProducts.length}`);
     }
+
+    // Determine ownership of current product (using platform_product_id)
+    const activeProductOwnership = platformProductId && purchasedProducts.includes(platformProductId)
+      ? (customerStatus === 'REFUND' ? 'REFUND' : 'APPROVED')
+      : 'UNKNOWN';
 
     const rawPrice = productMetadata?.preco;
     const price =
@@ -497,6 +562,9 @@ export const get_enriched_context = createTool({
       customer_status: customerStatus,
       rules,
       sales_strategy: salesStrategy,
+      customer_purchased_products: purchasedProducts,
+      is_multi_product_customer: purchasedProducts.length > 1,
+      active_product_ownership: activeProductOwnership as 'APPROVED' | 'REFUND' | 'UNKNOWN',
     };
   },
 });
