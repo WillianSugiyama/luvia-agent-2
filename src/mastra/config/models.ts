@@ -6,7 +6,7 @@ import { openai } from '@ai-sdk/openai';
  */
 export const MODELS = {
   // Modelo principal para agentes e ferramentas
-  MAIN: openai('gpt-5'),
+  MAIN: openai('gpt-5-mini'),
 
   // String de modelo para agentes Mastra (formato: 'provider/model')
   AGENT_MODEL_STRING: 'openai/gpt-5',
