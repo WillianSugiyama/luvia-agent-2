@@ -1,11 +1,11 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import OpenAI from 'openai';
+import { generateObject } from 'ai';
+import { MODELS } from '../config/models';
 import { executeWithLogging } from '../utils/supabase-logger';
 
 let supabaseClient: SupabaseClient | null = null;
-let openaiClient: OpenAI | null = null;
 
 const getSupabaseClient = () => {
   if (!supabaseClient) {
@@ -15,15 +15,6 @@ const getSupabaseClient = () => {
     supabaseClient = createClient(url, key);
   }
   return supabaseClient;
-};
-
-const getOpenAIClient = () => {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
-    openaiClient = new OpenAI({ apiKey });
-  }
-  return openaiClient;
 };
 
 const validatePromisesInputSchema = z.object({
@@ -41,6 +32,17 @@ const validatePromisesOutputSchema = z.object({
   })),
   authorized_rules_used: z.array(z.string()),
   confidence_score: z.number().min(0).max(100),
+});
+
+// Schema para resposta do LLM (formato interno)
+const llmValidationResultSchema = z.object({
+  unauthorized: z.array(z.object({
+    promise: z.string(),
+    reason: z.string(),
+    severity: z.enum(['critical', 'high', 'medium', 'low']),
+  })),
+  authorized_rules_matched: z.array(z.string()),
+  confidence: z.number().min(0).max(100),
 });
 
 // Padrões comuns de promessas
@@ -167,23 +169,23 @@ Critérios de severidade:
 Responda APENAS com o JSON.
     `.trim();
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+    const llmResult = await generateObject({
+      model: MODELS.MAIN,
+      schema: llmValidationResultSchema,
       messages: [{ role: 'user', content: validationPrompt }],
       temperature: 0,
-      response_format: { type: 'json_object' },
     });
 
-    const result = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const result = llmResult.object;
 
-    const unauthorizedPromises = (result.unauthorized || []).map((u: any) => ({
+    const unauthorizedPromises = (result.unauthorized || []).map((u) => ({
       promise_text: u.promise || '',
       reason: u.reason || 'Não autorizada pelas regras',
       severity: u.severity || 'medium',
     }));
 
     if (logger && unauthorizedPromises.length > 0) {
-      logger.warn(`[ValidatePromises] Unauthorized promises detected - count: ${unauthorizedPromises.length}, promises: ${unauthorizedPromises.map((p: any) => p.promise_text).join(', ')}`);
+      logger.warn(`[ValidatePromises] Unauthorized promises detected - count: ${unauthorizedPromises.length}, promises: ${unauthorizedPromises.map((p) => p.promise_text).join(', ')}`);
     }
 
     return {

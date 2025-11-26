@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import { MODELS } from '../config/models';
 
 type EnrichedContext = {
   product: {
@@ -92,7 +93,7 @@ Contexto do Cliente: ${customerStatus} (Se ABANDONED, foque em recuperar).
 Seja persuasivo, mas claro e específico; priorize informações relevantes mesmo que passe de 180 caracteres.
     `.trim();
   },
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
 });
 
 export const supportAgent = new Agent({
@@ -133,7 +134,7 @@ Regras adicionais:
 Seja empático, resolutivo e use linguagem clara.
     `.trim();
   },
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
 });
 
 export const clarificationAgent = new Agent({
@@ -161,5 +162,5 @@ Regras importantes:
 - Se o usuário confirmar, o sistema vai rotear para o agente correto
 `.trim();
   },
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
 });

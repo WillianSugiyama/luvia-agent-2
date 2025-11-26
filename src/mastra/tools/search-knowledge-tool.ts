@@ -1,7 +1,9 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import OpenAI from 'openai';
+import { embed } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import { MODELS } from '../config/models';
 import { cosineSimilarity } from '../utils/vector-search';
 import { executeWithLogging } from '../utils/supabase-logger';
 
@@ -11,7 +13,6 @@ interface ProductRuleRow {
 }
 
 let supabaseClient: SupabaseClient | null = null;
-let openaiClient: OpenAI | null = null;
 
 const getSupabaseClient = () => {
   if (!supabaseClient) {
@@ -26,20 +27,6 @@ const getSupabaseClient = () => {
   }
 
   return supabaseClient;
-};
-
-const getOpenAIClient = () => {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
-
-    if (!apiKey) {
-      throw new Error('OPENAI_API_KEY is not configured');
-    }
-
-    openaiClient = new OpenAI({ apiKey });
-  }
-
-  return openaiClient;
 };
 
 const searchKnowledgeInputSchema = z.object({
@@ -58,14 +45,10 @@ const searchKnowledgeOutputSchema = z.object({
 });
 
 const generateEmbedding = async (text: string, logger?: any) => {
-  const openai = getOpenAIClient();
-
-  const response = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: text,
+  const { embedding } = await embed({
+    model: openai.embedding(MODELS.EMBEDDINGS),
+    value: text,
   });
-
-  const embedding = response.data[0]?.embedding;
 
   if (!embedding) {
     throw new Error('Failed to generate embedding');

@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import { MODELS } from '../config/models';
 
 type KnowledgeResult = {
   content: string;
@@ -44,6 +45,6 @@ Diretrizes:
 Responda em português do Brasil.
     `.trim();
   },
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
 });
 

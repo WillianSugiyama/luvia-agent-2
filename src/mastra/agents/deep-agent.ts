@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import { MODELS } from '../config/models';
 import { Memory } from '@mastra/memory';
 import { LibSQLStore } from '@mastra/libsql';
 
@@ -162,7 +163,7 @@ IMPORTANTE:
 - Respeite a prioridade: pending context switch > ambiguidade > busca normal
     `.trim();
   },
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
   agents: {
     salesAgent,
     supportAgent,

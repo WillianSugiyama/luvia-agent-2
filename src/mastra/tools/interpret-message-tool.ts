@@ -1,22 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import OpenAI from 'openai';
-
-let openaiClient: OpenAI | null = null;
-
-const getOpenAIClient = () => {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
-
-    if (!apiKey) {
-      throw new Error('OPENAI_API_KEY is not configured');
-    }
-
-    openaiClient = new OpenAI({ apiKey });
-  }
-
-  return openaiClient;
-};
+import { generateObject } from 'ai';
+import { MODELS } from '../config/models';
 
 const interpretMessageInputSchema = z.object({
   message: z.string(),
@@ -41,8 +26,6 @@ export const interpret_user_message = createTool({
   outputSchema: interpretMessageOutputSchema,
   execute: async (inputData) => {
     const { message, previous_product_name } = inputData;
-
-    const client = getOpenAIClient();
 
     const system = `
 Você é um analisador de mensagens de WhatsApp em português, com erros de digitação, abreviações e frases incompletas.
@@ -81,83 +64,29 @@ Mensagem do usuário:
 
 Produto anterior (se houver):
 "${previous_product_name ?? ''}"
-
-Responda APENAS com um JSON do tipo:
-{
-  "is_clarification_response": boolean,
-  "has_clear_product": boolean,
-  "product_name": string | null,
-  "normalized_query": string,
-  "interaction_type": "support" | "pricing" | "purchase" | "upgrade" | "refund" | "general"
-}
 `.trim();
 
-    const completion = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: userContent },
-      ],
-      response_format: { type: 'json_object' },
-    });
+    try {
+      const result = await generateObject({
+        model: MODELS.MAIN,
+        schema: interpretMessageOutputSchema,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: userContent },
+        ],
+      });
 
-    const content = completion.choices[0]?.message?.content?.trim();
-
-    if (!content) {
+      return result.object;
+    } catch (error) {
+      // Fallback em caso de erro
+      console.error('Error in interpret_user_message:', error);
       return {
         is_clarification_response: false,
         has_clear_product: false,
         product_name: null,
         normalized_query: message,
-        interaction_type: 'general',
+        interaction_type: 'general' as const,
       };
     }
-
-    let parsed: any;
-
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      const match = content.match(/\{[\s\S]*\}/);
-      if (!match) {
-        return {
-          is_clarification_response: false,
-          has_clear_product: false,
-          product_name: null,
-          normalized_query: message,
-          interaction_type: 'general',
-        };
-      }
-      parsed = JSON.parse(match[0]);
-    }
-
-    const isClarification =
-      typeof parsed.is_clarification_response === 'boolean'
-        ? parsed.is_clarification_response
-        : false;
-    const hasClearProduct =
-      typeof parsed.has_clear_product === 'boolean'
-        ? parsed.has_clear_product
-        : false;
-    const productName =
-      typeof parsed.product_name === 'string' ? parsed.product_name : null;
-    const normalizedQuery =
-      typeof parsed.normalized_query === 'string' && parsed.normalized_query.trim().length > 0
-        ? parsed.normalized_query
-        : message;
-    const interactionTypeRaw = typeof parsed.interaction_type === 'string' ? parsed.interaction_type : 'general';
-    const allowedTypes = ['support', 'pricing', 'purchase', 'upgrade', 'refund', 'general'] as const;
-    const interactionType: 'support' | 'pricing' | 'purchase' | 'upgrade' | 'refund' | 'general' =
-      allowedTypes.includes(interactionTypeRaw as any)
-        ? (interactionTypeRaw as 'support' | 'pricing' | 'purchase' | 'upgrade' | 'refund' | 'general')
-        : 'general';
-
-    return {
-      is_clarification_response: isClarification,
-      has_clear_product: hasClearProduct,
-      product_name: productName,
-      normalized_query: normalizedQuery,
-      interaction_type: interactionType,
-    };
   },
 });

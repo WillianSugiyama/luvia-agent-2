@@ -538,6 +538,12 @@ Analise e responda apropriadamente.
   },
 });
 
+// Helper function to check if a string is a valid UUID
+const isValidUUID = (str: string): boolean => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(str);
+};
+
 // Step 3: Guardrail Validation
 const guardrail_validation_step = createStep({
   id: 'guardrail_validation',
@@ -581,21 +587,34 @@ const guardrail_validation_step = createStep({
       };
     }
 
-    // 1. Detectar PII
+    // 1. Detectar PII (sempre executar)
     const piiResult = await detect_pii_tool.execute(
       { text: agent_response },
       { mastra }
     ) as { has_pii: boolean; findings: Array<{ value: string; type: string; masked: string; position: { start: number; end: number } }>; risk_score: number; sanitized_text: string };
 
-    // 2. Validar promessas
-    const promisesResult = await validate_promises_tool.execute(
-      {
-        response_text: agent_response,
-        team_id: context.team_id,
-        product_id: context.product_id,
-      },
-      { mastra }
-    ) as { is_valid: boolean; unauthorized_promises: Array<{ promise_text: string; reason: string; severity: string }>; authorized_rules_used: string[]; confidence_score: number };
+    // 2. Validar promessas (apenas se product_id for um UUID válido)
+    let promisesResult: { is_valid: boolean; unauthorized_promises: Array<{ promise_text: string; reason: string; severity: string }>; authorized_rules_used: string[]; confidence_score: number } | null = null;
+    const shouldValidatePromises = isValidUUID(context.product_id);
+
+    if (shouldValidatePromises) {
+      if (logger) {
+        logger.info(`[Step 3] Validating promises for product_id: ${context.product_id}`);
+      }
+
+      promisesResult = await validate_promises_tool.execute(
+        {
+          response_text: agent_response,
+          team_id: context.team_id,
+          product_id: context.product_id,
+        },
+        { mastra }
+      ) as { is_valid: boolean; unauthorized_promises: Array<{ promise_text: string; reason: string; severity: string }>; authorized_rules_used: string[]; confidence_score: number };
+    } else {
+      if (logger) {
+        logger.info(`[Step 3] Skipping promise validation - product_id is not a valid UUID: "${context.product_id}"`);
+      }
+    }
 
     // Coletar issues
     const validationIssues: Array<{ type: string; severity: string; description: string }> = [];
@@ -610,7 +629,7 @@ const guardrail_validation_step = createStep({
       }
     }
 
-    if (!promisesResult.is_valid) {
+    if (promisesResult && !promisesResult.is_valid) {
       for (const promise of promisesResult.unauthorized_promises) {
         validationIssues.push({
           type: 'unauthorized_promise',

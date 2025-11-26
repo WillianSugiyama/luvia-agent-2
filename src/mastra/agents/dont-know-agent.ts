@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import { MODELS } from '../config/models';
 
 export const dontKnowAgent = new Agent({
   name: 'dont_know_agent',
@@ -32,5 +33,5 @@ IMPORTANTE:
 - Seja direto sobre a limitação
 - Transmita confiança de que o problema será resolvido
   `.trim(),
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
 });

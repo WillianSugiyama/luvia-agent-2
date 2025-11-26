@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import { MODELS } from '../config/models';
 
 export const guardrailAgent = new Agent({
   name: 'guardrail_agent',
@@ -91,5 +92,5 @@ REGRAS DE DECISÃO:
 Responda APENAS com o JSON, sem texto adicional.
     `.trim();
   },
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
 });

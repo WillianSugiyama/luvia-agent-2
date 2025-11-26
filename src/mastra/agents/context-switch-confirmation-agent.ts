@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import { MODELS } from '../config/models';
 
 export const contextSwitchConfirmationAgent = new Agent({
   name: 'context_switch_confirmation_agent',
@@ -57,5 +58,5 @@ REGRAS:
 NÃO adicione texto adicional, APENAS o JSON.
     `.trim();
   },
-  model: 'openai/gpt-4o-mini',
+  model: MODELS.AGENT_MODEL_STRING,
 });
