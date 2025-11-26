@@ -87,7 +87,43 @@ const security_and_enrich_step = createStep({
       throw new Error('Input data and Mastra instance are required');
     }
 
-    const { team_id, message, phone, email, user_confirmation } = inputData;
+    const { team_id, message, phone, email, user_confirmation: explicitConfirmation } = inputData;
+
+    // Auto-detect confirmation from message (sim, s, yes, etc.)
+    const isConfirmationMessage = (msg: string): boolean => {
+      const normalized = msg.trim().toLowerCase();
+      const confirmationPatterns = [
+        /^s$/,           // "s"
+        /^sim$/,         // "sim"
+        /^ss$/,          // "ss"
+        /^sim!?$/,       // "sim" ou "sim!"
+        /^yes$/,         // "yes"
+        /^yep$/,         // "yep"
+        /^ok$/,          // "ok"
+        /^okay$/,        // "okay"
+        /^confirmo$/,    // "confirmo"
+        /^claro$/,       // "claro"
+        /^com certeza$/, // "com certeza"
+        /^isso mesmo$/,  // "isso mesmo"
+        /^é esse$/,      // "é esse"
+        /^é esse mesmo$/, // "é esse mesmo"
+        /^exato$/,       // "exato"
+        /^👍/,           // emoji thumbs up
+        /^✅/,           // emoji check mark
+      ];
+
+      return confirmationPatterns.some(pattern => pattern.test(normalized));
+    };
+
+    // Use explicit confirmation or auto-detect from message
+    const user_confirmation = explicitConfirmation || isConfirmationMessage(message);
+
+    if (user_confirmation && !explicitConfirmation) {
+      console.log(`[Step 1] Auto-detected confirmation from message: "${message}"`);
+      if (logger) {
+        logger.info(`[Step 1] Auto-detected confirmation from user message`);
+      }
+    }
 
     // 1. Security Layer
     const securityResult = await validate_security_layer.execute(
@@ -765,8 +801,9 @@ IMPORTANTE:
       }
     }
 
-    // Se ambíguo, usa clarificationAgent diretamente
-    if (inputData.is_ambiguous || inputData.needs_confirmation) {
+    // Se ambíguo (mas não needs_confirmation), usa clarificationAgent diretamente
+    // Para needs_confirmation, deixamos cair para o deepAgent que tem contexto completo do produto
+    if (inputData.is_ambiguous && !inputData.needs_confirmation) {
       if (logger) {
         logger.info('[Step 2] Routing to clarificationAgent (ambiguous)');
       }
@@ -788,6 +825,7 @@ IMPORTANTE:
     // Usar Deep Agent com network() para roteamento inteligente
     const deepAgent = mastra.getAgent('deepAgent' as any);
 
+    console.log(`[Step 2] Invoking Deep Agent network - product: ${inputData.product_name}, intent: ${inputData.intent.interaction_type}, needs_confirmation: ${inputData.needs_confirmation}`);
     if (logger) {
       logger.info(`[Step 2] Invoking Deep Agent network - product: ${inputData.product_name}, intent: ${inputData.intent.interaction_type}`);
     }
@@ -797,14 +835,19 @@ IMPORTANTE:
       const contextualPrompt = `
 CONTEXTO DO CLIENTE:
 - Produto: ${inputData.product_name}
+- Preço: ${inputData.enriched_context.product.price}
 - Status: ${inputData.enriched_context.customer_status}
 - Intenção detectada: ${inputData.intent.interaction_type}
+${inputData.needs_confirmation ? '\n⚠️  IMPORTANTE: O sistema detectou que o cliente pode estar perguntando sobre preço, mas não confirmamos 100% que é sobre este produto. Pergunte para confirmar antes de responder.' : ''}
 
 MENSAGEM DO CLIENTE:
 "${inputData.sanitized_message}"
 
 Analise e responda apropriadamente.
       `.trim();
+
+      console.log(`[Step 2] Prompt length: ${contextualPrompt.length} chars`);
+      console.log(`[Step 2] Prompt preview: ${contextualPrompt.substring(0, 200)}...`);
 
       // Usar network() para roteamento automático
       const networkResult = await deepAgent.network(contextualPrompt, {
@@ -814,18 +857,51 @@ Analise e responda apropriadamente.
       // Processar eventos do network
       let response = '';
       let agentUsed = 'deepAgent';
+      let chunkCount = 0;
 
       for await (const chunk of networkResult) {
+        chunkCount++;
+
+        // Log chunk type for debugging
+        console.log(`[Step 2] Chunk ${chunkCount}: type="${chunk.type}"`);
+
         if (logger) {
           logger.debug(`[Step 2] Network event - type: ${chunk.type}`);
         }
 
         if (chunk.type === 'agent-execution-event-text-delta') {
-          // Acumular texto
+          // Acumular texto (streaming)
+          // The payload is double-nested: chunk.payload.payload contains the actual data
+          const outerPayload = chunk.payload as any;
+          const innerPayload = outerPayload?.payload;
+
+          // Try different possible field names for the delta text in the inner payload
+          const delta = innerPayload?.delta || innerPayload?.textDelta || innerPayload?.text || innerPayload?.content;
+
+          if (delta) {
+            response += delta;
+            console.log(`[Step 2] Text delta received: ${delta.length} chars, total: ${response.length}`);
+          } else {
+            // Log payload structure to debug
+            console.log(`[Step 2] Text delta chunk but no delta found.`);
+            console.log(`  Outer payload keys:`, Object.keys(outerPayload || {}));
+            console.log(`  Inner payload keys:`, Object.keys(innerPayload || {}));
+            if (innerPayload) {
+              console.log(`  Inner payload sample:`, JSON.stringify(innerPayload).substring(0, 200));
+            }
+          }
         }
 
-        if (chunk.type === 'network-execution-event-step-finish') {
-          response = chunk.payload?.result ?? '';
+        if (chunk.type === 'agent-execution-event-step-finish') {
+          // Correct chunk type name!
+          // The payload is double-nested: chunk.payload.payload contains the actual data
+          const outerPayload = chunk.payload as any;
+          const innerPayload = outerPayload?.payload;
+          const result = innerPayload?.result || innerPayload?.text || innerPayload?.content || '';
+          console.log(`[Step 2] Got result from step-finish - length: ${result.length} chars`);
+          if (result) {
+            response = result;
+          }
         }
 
         if (chunk.type === 'routing-agent-end') {
@@ -833,9 +909,20 @@ Analise e responda apropriadamente.
           const payload = chunk.payload as any;
           if (payload?.agentName) {
             agentUsed = payload.agentName;
+            console.log(`[Step 2] Routed to agent: ${agentUsed}`);
           }
         }
+
+        // Log unknown chunk types
+        if (chunk.type !== 'agent-execution-event-text-delta' &&
+            chunk.type !== 'agent-execution-event-step-finish' &&
+            chunk.type !== 'routing-agent-end') {
+          console.log(`[Step 2] Unknown chunk type: ${chunk.type}, has_payload: ${!!chunk.payload}`);
+        }
       }
+
+      console.log(`[Step 2] Deep Agent completed - chunks: ${chunkCount}, agent_used: ${agentUsed}, response_length: ${response.length}`);
+      console.log(`[Step 2] Response preview: ${response.substring(0, 200)}...`);
 
       if (logger) {
         logger.info(`[Step 2] Deep Agent completed - agent_used: ${agentUsed}, response_length: ${response.length}`);

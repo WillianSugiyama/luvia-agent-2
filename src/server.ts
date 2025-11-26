@@ -36,7 +36,11 @@ app.post('/api/chat', async (req, res) => {
       },
     });
 
+    console.log('[Server] Workflow result status:', result.status);
+    console.log('[Server] Workflow result.result:', JSON.stringify(result.result, null, 2));
+
     if (result.status !== 'success') {
+      console.error('[Server] Workflow failed:', result.status, (result as any).error);
       return res.status(500).json({
         workflow_run_id: run.runId,
         status: result.status,
@@ -44,10 +48,14 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    return res.json({
+    const response = {
       workflow_run_id: run.runId,
       ...result.result,
-    });
+    };
+
+    console.log('[Server] Sending response:', JSON.stringify(response, null, 2));
+
+    return res.json(response);
   } catch (err: any) {
     console.error('Error in /api/chat:', err);
     return res.status(500).json({

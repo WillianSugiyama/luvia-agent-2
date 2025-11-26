@@ -18,12 +18,11 @@ interface CustomerEventRow {
 }
 
 /**
- * Formats price from cents to BRL currency format
- * @param priceInCents - Price in cents (e.g., 4788 = R$ 47,88)
- * @returns Formatted price string (e.g., "R$ 47,88")
+ * Formats price to BRL currency format
+ * @param priceInReais - Price in reais (e.g., 4788 = R$ 4.788,00)
+ * @returns Formatted price string (e.g., "R$ 4.788,00")
  */
-const formatPriceToBRL = (priceInCents: number): string => {
-  const priceInReais = priceInCents / 100;
+const formatPriceToBRL = (priceInReais: number): string => {
   return new Intl.NumberFormat('pt-BR', {
     style: 'currency',
     currency: 'BRL',

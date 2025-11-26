@@ -26,12 +26,11 @@ interface CustomerEventRow {
 }
 
 /**
- * Formats price from cents to BRL currency format
- * @param priceInCents - Price in cents (e.g., 4788 = R$ 47,88)
- * @returns Formatted price string (e.g., "R$ 47,88")
+ * Formats price to BRL currency format
+ * @param priceInReais - Price in reais (e.g., 4788 = R$ 4.788,00)
+ * @returns Formatted price string (e.g., "R$ 4.788,00")
  */
-const formatPriceToBRL = (priceInCents: number): string => {
-  const priceInReais = priceInCents / 100;
+const formatPriceToBRL = (priceInReais: number): string => {
   return new Intl.NumberFormat('pt-BR', {
     style: 'currency',
     currency: 'BRL',
@@ -610,9 +609,13 @@ export const get_enriched_context = createTool({
       : 'UNKNOWN';
 
     const rawPrice = productMetadata?.preco;
+
+    // Debug: Log raw price value
+    console.log(`\x1b[36m[GetEnrichedContext]\x1b[0m Raw price value from metadata: ${rawPrice} (type: ${typeof rawPrice})`);
+
     const price =
       typeof rawPrice === 'number'
-        ? formatPriceToBRL(rawPrice) // Format from cents to BRL (e.g., 4788 → R$ 47,88)
+        ? formatPriceToBRL(rawPrice) // Format from reais to BRL (e.g., 4788 → R$ 4.788,00)
         : typeof rawPrice === 'string'
           ? rawPrice // Already formatted string, use as-is
           : '';
