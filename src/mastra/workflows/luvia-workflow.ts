@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { inputSchema as luviaInputSchema } from '../../schemas/input.schema';
 import { validate_security_layer } from '../tools/security-tool';
 import { advanced_product_search } from '../tools/advanced-product-search-tool';
-import { manageConversationContext, loadConversationState, updatePurchasedProducts, setActiveSupportProduct, setPendingContextSwitch } from '../tools/manage-conversation-context-tool';
+import { manageConversationContext, loadConversationState, updatePurchasedProducts, setActiveSupportProduct, setPendingContextSwitch, setPendingProductConfirmation, clearPendingProductConfirmation } from '../tools/manage-conversation-context-tool';
 import { get_enriched_context } from '../tools/get-enriched-context-tool';
 import { interpret_user_message } from '../tools/interpret-message-tool';
 import { detect_pii_tool } from '../tools/detect-pii-tool';
@@ -155,6 +155,54 @@ const security_and_enrich_step = createStep({
     // 3. Load Previous State
     const previousState = await loadConversationState(conversationId);
 
+    // 3.5. Check for pending product confirmation (PRIORITY)
+    if (previousState?.pending_product_confirmation) {
+      console.log(`[Step 3.5] Pending product confirmation detected - suggested product: "${previousState.pending_product_confirmation.suggested_product_name}"`);
+
+      // DON'T clear the pending confirmation yet - Step 2 needs it!
+      // We'll clear it after the productHistoryConfirmationAgent processes the response
+
+      // Load enriched context for the suggested product
+      const enrichedContext = await get_enriched_context.execute(
+        {
+          product_id: previousState.pending_product_confirmation.suggested_product_id,
+          team_id,
+          customer_phone: sanitizedPhone ?? '',
+          user_intent: safeMessage,
+        },
+        { requestContext, mastra }
+      ) as { product: { name: string; price: string; checkout_link: string; description?: string }; customer_status: string; rules: string[]; sales_strategy: { framework: string; instruction: string; cta_suggested: string; should_offer: boolean } };
+
+      // Use enriched product name (from database) instead of cached name
+      // This ensures we always have the most up-to-date product name
+      const productName = enrichedContext.product.name || previousState.pending_product_confirmation.suggested_product_name;
+
+      console.log(`[Step 3.5] ✅ Product loaded: "${productName}" (price: ${enrichedContext.product.price})`);
+      console.log(`[Step 3.5] Customer status: ${enrichedContext.customer_status}`);
+
+      // Return enriched context with pending confirmation flag
+      // Step 2 will use productHistoryConfirmationAgent to interpret the user's response
+      return {
+        original_message: message,
+        sanitized_message: safeMessage,
+        conversation_id: conversationId,
+        team_id,
+        customer_phone: sanitizedPhone,
+        customer_email: email,
+        product_id: previousState.pending_product_confirmation.suggested_product_id,
+        product_name: productName, // Use the enriched product name
+        enriched_context: enrichedContext,
+        is_ambiguous: false,
+        needs_confirmation: false,
+        intent: {
+          interaction_type: 'confirmation_response',
+          has_clear_product: true,
+          normalized_query: safeMessage,
+        },
+        needs_multi_product_clarification: false,
+      };
+    }
+
     // 4. Interpret Intent
     const intent = await interpret_user_message.execute(
       {
@@ -176,8 +224,17 @@ const security_and_enrich_step = createStep({
     if (sanitizedPhone && !user_confirmation) {
       console.log(`[Step 5] Checking customer products for phone: ${sanitizedPhone}`);
 
+      // For pricing intents, only fetch ABANDONED products (not approved/refund)
+      // Customer asking "quanto custa" should see abandoned carts, not purchased products
+      const isPricingIntent = intent.interaction_type === 'pricing';
+      const eventTypesFilter = isPricingIntent ? ['abandoned'] : undefined;
+
+      if (isPricingIntent) {
+        console.log(`[Step 5] Pricing intent detected - filtering for abandoned products only`);
+      }
+
       const customerProductsResult = await fetch_customer_products.execute(
-        { team_id, customer_phone: sanitizedPhone },
+        { team_id, customer_phone: sanitizedPhone, event_types_filter: eventTypesFilter },
         { requestContext, mastra }
       ) as { has_products: boolean; products: any[]; total_count: number };
 
@@ -186,22 +243,84 @@ const security_and_enrich_step = createStep({
       if (customerProductsResult.has_products && customerProducts.length > 0) {
         console.log(`[Step 5] Customer has ${customerProducts.length} product(s)`);
 
-        // Only ask for product selection if intent is support/general
-        const isSeekingSupport = intent.interaction_type === 'support' || intent.interaction_type === 'general';
+        // Ask for product selection UNLESS it's clearly about purchasing a new product
+        // When customer has products in history and asks about price, support, upgrade, refund, etc.
+        // they're likely asking about products they already have
+        const shouldAskAboutExistingProducts = intent.interaction_type !== 'purchase';
 
-        if (isSeekingSupport && !previousState?.active_support_product_id) {
-          // Case 1: Customer has exactly 1 product - auto-select it and continue to enrichment
+        if (shouldAskAboutExistingProducts && !previousState?.active_support_product_id) {
+          // Case 1: Customer has exactly 1 product - ask for confirmation first
           if (customerProducts.length === 1) {
             const singleProduct = customerProducts[0];
-            console.log(`[Step 5] Customer has 1 product - auto-selecting: "${singleProduct.product_name}" (UUID: ${singleProduct.product_id})`);
 
-            preSelectedProduct = {
-              product_id: singleProduct.product_id,
-              product_name: singleProduct.product_name,
+            // Debug: Check if product_name is empty
+            if (!singleProduct.product_name || singleProduct.product_name.trim() === '') {
+              console.error(`[Step 5] ⚠️ ERROR: product_name is EMPTY for product_id: ${singleProduct.product_id}`);
+              console.error(`[Step 5] Full product object:`, JSON.stringify(singleProduct, null, 2));
+            }
+
+            console.log(`[Step 5] Customer has 1 product - asking for confirmation: "${singleProduct.product_name}" (UUID: ${singleProduct.product_id}, platform: ${singleProduct.product_id_plataforma})`);
+
+            // Set pending confirmation in state
+            await setPendingProductConfirmation(conversationId, {
+              suggested_product_id: singleProduct.product_id,
+              suggested_product_name: singleProduct.product_name || 'produto',
+              event_type: singleProduct.event_type,
+              reason: 'single_product',
+              timestamp: Date.now(),
+            });
+
+            // Build confirmation question based on event type
+            const eventTypeText = singleProduct.event_type === 'approved'
+              ? 'que você já comprou'
+              : singleProduct.event_type === 'abandoned'
+                ? 'no seu carrinho'
+                : singleProduct.event_type === 'refund'
+                  ? 'que você solicitou reembolso'
+                  : 'no seu histórico';
+
+            // Use product name or fallback
+            const productDisplayName = singleProduct.product_name && singleProduct.product_name.trim() !== ''
+              ? singleProduct.product_name
+              : 'um produto';
+
+            const confirmationMessage = `Olá! Vi que você tem ${productDisplayName === 'um produto' ? productDisplayName : `o produto **${productDisplayName}**`} ${eventTypeText}. Seria sobre esse produto que você quer falar? 😊`;
+
+            console.log(`[Step 5] Confirmation message: ${confirmationMessage}`);
+
+            // Early return with confirmation message
+            earlyReturnForProductSelection = {
+              original_message: message,
+              sanitized_message: safeMessage,
+              conversation_id: conversationId,
+              team_id,
+              customer_phone: sanitizedPhone,
+              customer_email: email,
+              product_id: '',
+              product_name: '',
+              enriched_context: {
+                product: { name: '', price: '', checkout_link: '' },
+                customer_status: 'UNKNOWN',
+                rules: [],
+                sales_strategy: {
+                  framework: 'Genérico',
+                  instruction: confirmationMessage,
+                  cta_suggested: '',
+                  should_offer: false,
+                },
+              },
+              is_ambiguous: false,
+              needs_confirmation: true,
+              intent: {
+                interaction_type: intent.interaction_type,
+                has_clear_product: false,
+                normalized_query: intent.normalized_query,
+              },
+              needs_multi_product_clarification: false,
+              multi_product_clarification_message: confirmationMessage,
             };
 
             shouldSkipEmbeddingSearch = true;
-            console.log(`[Step 5] Skipping embedding search - will use customer's product directly`);
           }
           // Case 2: Customer has 2+ products - ask which one
           else {
@@ -209,7 +328,25 @@ const security_and_enrich_step = createStep({
 
             // Build clarification message listing customer's products
             const productsList = customerProducts
-              .map((p, i) => `${i + 1}. **${p.product_name}** (${p.event_type === 'APPROVED' ? 'Aprovado' : p.event_type === 'ABANDONED' ? 'Carrinho Abandonado' : 'Reembolsado'})`)
+              .map((p, i) => {
+                // Debug: log event_type to identify unexpected values
+                console.log(`[Step 5] Product "${p.product_name}" has event_type: "${p.event_type}" (type: ${typeof p.event_type})`);
+
+                // Map event type to user-friendly label
+                let statusLabel = 'Desconhecido';
+                if (p.event_type === 'approved') {
+                  statusLabel = 'Aprovado';
+                } else if (p.event_type === 'abandoned') {
+                  statusLabel = 'Carrinho Abandonado';
+                } else if (p.event_type === 'refund') {
+                  statusLabel = 'Reembolsado';
+                } else {
+                  console.warn(`[Step 5] ⚠️ Unexpected event_type: "${p.event_type}" for product "${p.product_name}"`);
+                  statusLabel = `Desconhecido (${p.event_type})`;
+                }
+
+                return `${i + 1}. **${p.product_name}** (${statusLabel})`;
+              })
               .join('\n');
 
             const clarificationMessage = `Olá! Vi que você tem os seguintes produtos:\n\n${productsList}\n\nSobre qual produto você gostaria de falar? 😊`;
@@ -403,6 +540,12 @@ const deep_agent_routing_step = createStep({
     requestContext.set('team_id', inputData.team_id);
     requestContext.set('product_id', inputData.product_id);
 
+    // Inject pending confirmation if it exists (for productHistoryConfirmationAgent)
+    const conversationState = await loadConversationState(inputData.conversation_id);
+    if (conversationState?.pending_product_confirmation) {
+      requestContext.set('pending_product_confirmation', conversationState.pending_product_confirmation);
+    }
+
     // Se for saudação, retorna diretamente a resposta pré-formatada
     if (inputData.intent.interaction_type === 'greeting') {
       const greetingResponse = inputData.enriched_context.sales_strategy.instruction;
@@ -414,6 +557,22 @@ const deep_agent_routing_step = createStep({
       return {
         agent_response: greetingResponse,
         agent_used: 'greetingHandler',
+        needs_human_escalation: false,
+        context: inputData,
+      };
+    }
+
+    // Se precisa confirmação de produto (single ou multiple), retorna mensagem diretamente
+    // Isso evita que o clarificationAgent sobrescreva a mensagem com placeholder
+    if (inputData.needs_confirmation && inputData.multi_product_clarification_message) {
+      console.log('[Step 2] Returning product confirmation message directly (avoiding clarificationAgent)');
+      if (logger) {
+        logger.info('[Step 2] Returning product confirmation message');
+      }
+
+      return {
+        agent_response: inputData.multi_product_clarification_message,
+        agent_used: 'productConfirmation',
         needs_human_escalation: false,
         context: inputData,
       };
@@ -431,6 +590,179 @@ const deep_agent_routing_step = createStep({
         needs_human_escalation: false,
         context: inputData,
       };
+    }
+
+    // Handle pending product confirmation responses
+    if (inputData.intent.interaction_type === 'confirmation_response') {
+      console.log('[Step 2] Processing confirmation response via productHistoryConfirmationAgent');
+
+      const conversationState = await loadConversationState(inputData.conversation_id);
+
+      if (conversationState?.pending_product_confirmation) {
+        // Set pending confirmation in requestContext for the agent
+        requestContext.set('pending_product_confirmation', conversationState.pending_product_confirmation);
+
+        if (logger) {
+          logger.info(`[Step 2] Routing to productHistoryConfirmationAgent - product: ${conversationState.pending_product_confirmation.suggested_product_name}`);
+        }
+
+        try {
+          const confirmationAgent = mastra.getAgent('productHistoryConfirmationAgent' as any);
+          const result = await confirmationAgent.generate(
+            [{ role: 'user', content: inputData.sanitized_message }],
+            { requestContext }
+          );
+
+          const confirmationText = result.text ?? '';
+          console.log(`[Step 2] Confirmation agent response: ${confirmationText.substring(0, 200)}...`);
+
+          // Parse JSON response
+          let confirmationResult: { confirmed: boolean; rejected: boolean; user_response_type: string; explanation: string };
+          try {
+            confirmationResult = JSON.parse(confirmationText);
+          } catch (parseError) {
+            console.error('[Step 2] Failed to parse confirmation agent response, treating as indecisive');
+            confirmationResult = {
+              confirmed: false,
+              rejected: false,
+              user_response_type: 'indecisive',
+              explanation: 'Failed to parse response',
+            };
+          }
+
+          console.log(`[Step 2] Confirmation result: ${confirmationResult.user_response_type} (confirmed=${confirmationResult.confirmed}, rejected=${confirmationResult.rejected})`);
+
+          // Clear pending confirmation now that we've processed it
+          await clearPendingProductConfirmation(inputData.conversation_id);
+
+          if (confirmationResult.confirmed) {
+            // User confirmed - continue with the suggested product (already loaded in enriched_context)
+            console.log('[Step 2] User CONFIRMED - proceeding with suggested product');
+
+            // Route to appropriate agent based on original intent
+            // Use the enriched context that was already loaded in Step 1
+            const deepAgent = mastra.getAgent('deepAgent' as any);
+
+            // Build a detailed prompt with ALL product information
+            const productName = inputData.enriched_context.product.name;
+            const productPrice = inputData.enriched_context.product.price;
+            const checkoutLink = inputData.enriched_context.product.checkout_link;
+            const customerStatus = inputData.enriched_context.customer_status;
+
+            const contextualPrompt = `
+CONFIRMAÇÃO DE PRODUTO - O CLIENTE CONFIRMOU QUE QUER FALAR SOBRE ESTE PRODUTO:
+
+PRODUTO:
+- Nome: ${productName}
+- Preço: ${productPrice}
+- Link de Checkout: ${checkoutLink}
+
+CLIENTE:
+- Status: ${customerStatus}
+- Pergunta Original: "${inputData.sanitized_message}"
+
+CONTEXTO:
+O cliente estava perguntando sobre preço ("${inputData.sanitized_message}") e nós perguntamos se ele estava se referindo ao produto "${productName}".
+Ele confirmou que SIM, é sobre esse produto.
+
+IMPORTANTE:
+- Use o nome REAL do produto: "${productName}"
+- Responda diretamente sobre o preço: ${productPrice}
+- Se apropriado, ofereça o link de checkout
+- NÃO use placeholders como "[PRODUTO SUGERIDO]" - use o nome REAL
+            `.trim();
+
+            console.log(`[Step 2] Calling deepAgent with confirmed product: "${productName}"`);
+            console.log(`[Step 2] Contextual prompt length: ${contextualPrompt.length} chars`);
+
+            const networkResult = await deepAgent.network(contextualPrompt, { requestContext });
+            let response = '';
+            let agentUsed = 'deepAgent';
+            let chunkCount = 0;
+
+            for await (const chunk of networkResult) {
+              chunkCount++;
+              console.log(`[Step 2] Chunk #${chunkCount}: type="${chunk.type}"`);
+
+              if (chunk.type === 'network-execution-event-step-finish') {
+                response = chunk.payload?.result ?? '';
+                console.log(`[Step 2] Got result from step-finish: ${response.length} chars`);
+              }
+              if (chunk.type === 'routing-agent-end') {
+                const payload = chunk.payload as any;
+                if (payload?.agentName) {
+                  agentUsed = payload.agentName;
+                  console.log(`[Step 2] Routed to agent: ${agentUsed}`);
+                }
+              }
+
+              // Log all chunk types for debugging
+              if (chunk.type !== 'network-execution-event-step-finish' && chunk.type !== 'routing-agent-end') {
+                console.log(`[Step 2] Other chunk type: ${chunk.type}, has payload: ${!!chunk.payload}`);
+              }
+            }
+
+            console.log(`[Step 2] Total chunks received: ${chunkCount}`);
+            console.log(`[Step 2] Deep agent response length: ${response.length} chars`);
+            console.log(`[Step 2] Deep agent response (first 200 chars): ${response.substring(0, 200)}...`);
+
+            return {
+              agent_response: response,
+              agent_used: agentUsed,
+              needs_human_escalation: false,
+              context: inputData,
+            };
+          } else if (confirmationResult.rejected) {
+            // User rejected - they want to talk about a different product
+            console.log('[Step 2] User REJECTED - they want a different product');
+
+            const clarificationMessage = `Entendi! Sobre qual produto você gostaria de falar?`;
+
+            return {
+              agent_response: clarificationMessage,
+              agent_used: 'clarificationAgent',
+              needs_human_escalation: false,
+              context: inputData,
+            };
+          } else {
+            // Indecisive - ask for clarification
+            console.log('[Step 2] User INDECISIVE - asking for clarification');
+
+            const clarificationMessage = `Desculpe, não entendi bem. Você gostaria de falar sobre o **${conversationState.pending_product_confirmation.suggested_product_name}**? Por favor, responda com "sim" ou "não". 😊`;
+
+            // Re-set pending confirmation (we didn't clear it because user was indecisive)
+            await setPendingProductConfirmation(inputData.conversation_id, conversationState.pending_product_confirmation);
+
+            return {
+              agent_response: clarificationMessage,
+              agent_used: 'clarificationAgent',
+              needs_human_escalation: false,
+              context: inputData,
+            };
+          }
+        } catch (error: any) {
+          console.error(`[Step 2] Error in productHistoryConfirmationAgent: ${error.message}`);
+          if (logger) {
+            logger.error(`[Step 2] productHistoryConfirmationAgent error: ${error.message}`);
+          }
+
+          // Clear pending confirmation on error
+          await clearPendingProductConfirmation(inputData.conversation_id);
+
+          // Fallback to clarification
+          return {
+            agent_response: 'Desculpe, não consegui processar sua resposta. Pode repetir?',
+            agent_used: 'clarificationAgent',
+            needs_human_escalation: false,
+            context: inputData,
+          };
+        }
+      } else {
+        console.warn('[Step 2] confirmation_response intent but no pending_product_confirmation in state!');
+        if (logger) {
+          logger.warn('[Step 2] confirmation_response intent but no pending confirmation found in state');
+        }
+      }
     }
 
     // Se ambíguo, usa clarificationAgent diretamente
@@ -587,34 +919,31 @@ const guardrail_validation_step = createStep({
       };
     }
 
-    // 1. Detectar PII (sempre executar)
-    const piiResult = await detect_pii_tool.execute(
-      { text: agent_response },
-      { mastra }
-    ) as { has_pii: boolean; findings: Array<{ value: string; type: string; masked: string; position: { start: number; end: number } }>; risk_score: number; sanitized_text: string };
-
-    // 2. Validar promessas (apenas se product_id for um UUID válido)
-    let promisesResult: { is_valid: boolean; unauthorized_promises: Array<{ promise_text: string; reason: string; severity: string }>; authorized_rules_used: string[]; confidence_score: number } | null = null;
+    // Validate PII and Promises in parallel
     const shouldValidatePromises = isValidUUID(context.product_id);
 
-    if (shouldValidatePromises) {
-      if (logger) {
-        logger.info(`[Step 3] Validating promises for product_id: ${context.product_id}`);
-      }
-
-      promisesResult = await validate_promises_tool.execute(
-        {
-          response_text: agent_response,
-          team_id: context.team_id,
-          product_id: context.product_id,
-        },
-        { mastra }
-      ) as { is_valid: boolean; unauthorized_promises: Array<{ promise_text: string; reason: string; severity: string }>; authorized_rules_used: string[]; confidence_score: number };
-    } else {
-      if (logger) {
-        logger.info(`[Step 3] Skipping promise validation - product_id is not a valid UUID: "${context.product_id}"`);
-      }
+    if (logger && shouldValidatePromises) {
+      logger.info(`[Step 3] Validating promises for product_id: ${context.product_id}`);
+    } else if (logger) {
+      logger.info(`[Step 3] Skipping promise validation - product_id is not a valid UUID: "${context.product_id}"`);
     }
+
+    const [piiResult, promisesResult] = await Promise.all([
+      detect_pii_tool.execute(
+        { text: agent_response },
+        { mastra }
+      ) as Promise<{ has_pii: boolean; findings: Array<{ value: string; type: string; masked: string; position: { start: number; end: number } }>; risk_score: number; sanitized_text: string }>,
+      shouldValidatePromises
+        ? validate_promises_tool.execute(
+            {
+              response_text: agent_response,
+              team_id: context.team_id,
+              product_id: context.product_id,
+            },
+            { mastra }
+          ) as Promise<{ is_valid: boolean; unauthorized_promises: Array<{ promise_text: string; reason: string; severity: string }>; authorized_rules_used: string[]; confidence_score: number }>
+        : Promise.resolve(null)
+    ]);
 
     // Coletar issues
     const validationIssues: Array<{ type: string; severity: string; description: string }> = [];

@@ -10,6 +10,8 @@ import type {
 } from '../../types/luvia.types';
 import { executeWithLogging } from '../utils/supabase-logger';
 import { cosineSimilarity } from '../utils/vector-search';
+import { searchProductRulesHybrid } from '../utils/supabase-hybrid-search';
+import type { ProductRuleHybridResult } from '../../types/hybrid-search.types';
 
 interface ProductEmbeddingRow {
   metadata: ProductMetadata;
@@ -22,6 +24,19 @@ interface ProductRuleRow {
 interface CustomerEventRow {
   event_type: string;
 }
+
+/**
+ * Formats price from cents to BRL currency format
+ * @param priceInCents - Price in cents (e.g., 4788 = R$ 47,88)
+ * @returns Formatted price string (e.g., "R$ 47,88")
+ */
+const formatPriceToBRL = (priceInCents: number): string => {
+  const priceInReais = priceInCents / 100;
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(priceInReais);
+};
 
 let supabaseClient: SupabaseClient | null = null;
 let openaiClient: OpenAI | null = null;
@@ -273,6 +288,71 @@ const fetchProductRules = async (
   return rules;
 };
 
+/**
+ * Fetch product rules using hybrid search (vector + BM25)
+ * This provides better relevance filtering compared to fetching all rules
+ */
+const fetchProductRulesHybrid = async (
+  teamId: string,
+  productId: string,
+  queryText: string,
+  queryEmbedding: number[],
+  logger?: any
+): Promise<string[]> => {
+  console.log(`\x1b[36m[GetEnrichedContext]\x1b[0m Using hybrid search for product rules`);
+  console.log(`\x1b[90m[RPC]\x1b[0m match_product_rules_hybrid - query: "${queryText.substring(0, 50)}..."`);
+
+  if (logger) {
+    logger.info(`[Supabase RPC] Executing: match_product_rules_hybrid - team_id: ${teamId}, product_id: ${productId}`);
+  }
+
+  try {
+    const results = await searchProductRulesHybrid({
+      queryEmbedding,
+      queryText,
+      teamId,
+      productId,
+      matchThreshold: 0.3,
+      bm25Weight: 0.3,
+      vectorWeight: 0.7,
+      resultLimit: 30,
+    }, { logger });
+
+    if (logger) {
+      logger.info(`[Supabase RPC] Hybrid rules search returned ${results.length} results`);
+    }
+
+    // Extract rules from metadata
+    const rules: string[] = [];
+    for (const result of results) {
+      const meta = result.metadata as any;
+
+      if (Array.isArray(meta.rules)) {
+        for (const rule of meta.rules) {
+          if (typeof rule === 'string' && rule.trim()) {
+            rules.push(rule.trim());
+          }
+        }
+      } else if (typeof meta.rule === 'string' && meta.rule.trim()) {
+        rules.push(meta.rule.trim());
+      }
+    }
+
+    console.log(`\x1b[36m[GetEnrichedContext]\x1b[0m Extracted ${rules.length} relevant rules from hybrid search`);
+
+    return rules;
+  } catch (error: any) {
+    console.error(`\x1b[31m[GetEnrichedContext]\x1b[0m Hybrid rules search FAILED: ${error.message}`);
+    if (logger) {
+      logger.error(`[Supabase RPC] match_product_rules_hybrid failed - ${error.message}`);
+      logger.info('Falling back to fetchProductRules (all rules)');
+    }
+
+    // Fallback to old method if hybrid search fails
+    return fetchProductRules(teamId, productId, logger);
+  }
+};
+
 const fetchCustomerStatus = async (
   teamId: string,
   customerPhone: string,
@@ -321,13 +401,13 @@ const fetchCustomerPurchasedProducts = async (
     logger,
     'fetchCustomerPurchasedProducts',
     'customer_events',
-    { team_id: teamId, customer_phone: customerPhone, event_type: 'APPROVED' },
+    { team_id: teamId, customer_phone: customerPhone, event_type: 'approved' },
     () => supabase
       .from('customer_events')
       .select('product_id, event_type')
       .eq('team_id', teamId)
       .eq('customer_phone', customerPhone)
-      .in('event_type', ['APPROVED', 'REFUND'])
+      .in('event_type', ['approved', 'refund'])
       .order('created_at', { ascending: false })
   );
 
@@ -346,9 +426,9 @@ const fetchCustomerPurchasedProducts = async (
     }
   }
 
-  // Filter only APPROVED (exclude REFUND)
+  // Filter only approved (exclude refund)
   const approvedProducts = Array.from(productMap.entries())
-    .filter(([_, eventType]) => eventType === 'APPROVED')
+    .filter(([_, eventType]) => eventType === 'approved')
     .map(([productId, _]) => productId);
 
   return approvedProducts;
@@ -397,7 +477,7 @@ const buildFallbackSalesStrategy = (userIntent: string, logger?: any) => {
   };
 };
 
-const fetchSalesStrategy = async (userIntent: string, logger?: any) => {
+const fetchSalesStrategy = async (userIntent: string, embedding: number[] | null, logger?: any) => {
   const qdrant = getQdrantClient();
 
   if (!qdrant) {
@@ -408,10 +488,11 @@ const fetchSalesStrategy = async (userIntent: string, logger?: any) => {
   }
 
   try {
-    const embedding = await generateIntentEmbedding(userIntent, logger);
+    // If embedding not provided, generate it (fallback)
+    const intentEmbedding = embedding ?? await generateIntentEmbedding(userIntent, logger);
 
     const results = await qdrant.search('sales_frameworks', {
-      vector: embedding,
+      vector: intentEmbedding,
       limit: 1,
       with_payload: true,
     });
@@ -505,10 +586,17 @@ export const get_enriched_context = createTool({
       logger.info(`Using platform_product_id for customer_events lookup: ${platformProductId}`);
     }
 
+    // Generate intent embedding for hybrid rules search
+    const intentEmbedding = resolvedProductId ? await generateIntentEmbedding(user_intent, logger) : null;
+
     const [rules, customerStatus, salesStrategy, purchasedProducts] = await Promise.all([
-      resolvedProductId ? fetchProductRules(team_id, resolvedProductId, logger) : Promise.resolve([]),
+      resolvedProductId && intentEmbedding
+        ? fetchProductRulesHybrid(team_id, resolvedProductId, user_intent, intentEmbedding, logger)
+        : resolvedProductId
+          ? fetchProductRules(team_id, resolvedProductId, logger)
+          : Promise.resolve([]),
       platformProductId ? fetchCustomerStatus(team_id, customer_phone, platformProductId, logger) : Promise.resolve('UNKNOWN'),
-      fetchSalesStrategy(user_intent, logger),
+      fetchSalesStrategy(user_intent, intentEmbedding, logger),
       fetchCustomerPurchasedProducts(team_id, customer_phone, logger),
     ]);
 
@@ -518,15 +606,15 @@ export const get_enriched_context = createTool({
 
     // Determine ownership of current product (using platform_product_id)
     const activeProductOwnership = platformProductId && purchasedProducts.includes(platformProductId)
-      ? (customerStatus === 'REFUND' ? 'REFUND' : 'APPROVED')
+      ? (customerStatus === 'refund' ? 'REFUND' : 'APPROVED')
       : 'UNKNOWN';
 
     const rawPrice = productMetadata?.preco;
     const price =
       typeof rawPrice === 'number'
-        ? String(rawPrice)
+        ? formatPriceToBRL(rawPrice) // Format from cents to BRL (e.g., 4788 → R$ 47,88)
         : typeof rawPrice === 'string'
-          ? rawPrice
+          ? rawPrice // Already formatted string, use as-is
           : '';
 
     const rawCheckout = productMetadata?.link_checkout ?? '';
@@ -550,8 +638,17 @@ export const get_enriched_context = createTool({
       (productMetadata as any)?.description ??
       '';
 
+    // Debug logging for product data
+    const productName = productMetadata?.nome ?? '';
+    if (!productName) {
+      console.warn(`\x1b[33m[GetEnrichedContext]\x1b[0m ⚠️ Product name is empty! product_id: ${product_id}, product_name input: ${product_name}`);
+      console.warn(`\x1b[33m[GetEnrichedContext]\x1b[0m productMetadata:`, productMetadata);
+    } else {
+      console.log(`\x1b[36m[GetEnrichedContext]\x1b[0m Product: "${productName}", Price: ${price}`);
+    }
+
     const product = {
-      name: productMetadata?.nome ?? '',
+      name: productName,
       price,
       checkout_link,
       description: description || undefined,

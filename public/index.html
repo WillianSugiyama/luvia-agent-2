@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8" />
-  <title>Luvia Deep Agent Chat</title>
+  <title>Luvia Deep Agent Debug Console</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     * {
@@ -12,151 +12,225 @@
 
     body {
       margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #121b22;
-      color: #e9edef;
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      background: #0d1117;
+      color: #c9d1d9;
       display: flex;
       justify-content: center;
       align-items: center;
-      height: 100vh;
+      min-height: 100vh;
+      padding: 20px;
     }
 
-    .chat-container {
+    .debug-container {
       width: 100%;
-      max-width: 420px;
+      max-width: 1400px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
       height: 90vh;
-      background: #111b21;
-      border-radius: 16px;
+    }
+
+    .chat-panel, .debug-panel {
+      background: #161b22;
+      border-radius: 12px;
+      border: 1px solid #30363d;
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
     }
 
-    .chat-header {
-      padding: 12px 16px;
-      background: #202c33;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .chat-header-top {
+    .panel-header {
+      padding: 16px;
+      background: #21262d;
+      border-bottom: 1px solid #30363d;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 12px;
     }
 
-    .avatar {
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #25d366, #128c7e);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 600;
+    .panel-title {
       font-size: 16px;
-      color: #fff;
-    }
-
-    .chat-title {
+      font-weight: 600;
+      color: #58a6ff;
       display: flex;
-      flex-direction: column;
+      align-items: center;
+      gap: 8px;
     }
 
-    .chat-title strong {
-      font-size: 14px;
-    }
-
-    .chat-title span {
+    .status-badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 12px;
       font-size: 11px;
-      color: #8696a0;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .status-badge.idle {
+      background: #1f6feb20;
+      color: #58a6ff;
+    }
+
+    .status-badge.thinking {
+      background: #f7850020;
+      color: #f78500;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    .status-badge.success {
+      background: #23883420;
+      color: #2ea043;
+    }
+
+    .status-badge.error {
+      background: #da364620;
+      color: #f85149;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .config-section {
+      padding: 12px 16px;
+      background: #0d1117;
+      border-bottom: 1px solid #30363d;
     }
 
     .config-row {
       display: flex;
       gap: 8px;
+      margin-bottom: 8px;
     }
 
     .config-row input {
       flex: 1;
-      background: #111b21;
-      border: 1px solid #202c33;
+      background: #161b22;
+      border: 1px solid #30363d;
       border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 11px;
-      color: #e9edef;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: #c9d1d9;
+      font-family: inherit;
     }
 
     .config-row input::placeholder {
-      color: #4f5b63;
+      color: #6e7681;
+    }
+
+    .config-row input:focus {
+      outline: none;
+      border-color: #58a6ff;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #8b949e;
+    }
+
+    .checkbox-row input[type='checkbox'] {
+      accent-color: #58a6ff;
     }
 
     .chat-body {
       flex: 1;
-      padding: 12px;
-      background: #0b141a;
+      padding: 16px;
       overflow-y: auto;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 12px;
     }
 
     .message {
-      max-width: 80%;
-      padding: 8px 10px;
-      border-radius: 10px;
+      max-width: 85%;
+      padding: 12px;
+      border-radius: 8px;
       font-size: 13px;
-      line-height: 1.3;
+      line-height: 1.5;
       position: relative;
-      white-space: pre-wrap;
     }
 
     .message.user {
       align-self: flex-end;
-      background: #005c4b;
-      border-bottom-right-radius: 2px;
+      background: #1f6feb;
+      color: #fff;
     }
 
     .message.agent {
       align-self: flex-start;
-      background: #202c33;
-      border-bottom-left-radius: 2px;
+      background: #21262d;
+      border: 1px solid #30363d;
     }
 
-    .message small {
-      display: block;
-      margin-top: 4px;
-      font-size: 10px;
-      color: #8696a0;
+    .message .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #30363d;
+      font-size: 11px;
+      color: #8b949e;
+    }
+
+    .message .meta .tag {
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: #30363d;
+    }
+
+    .message .meta .tag.agent-used {
+      background: #1f6feb20;
+      color: #58a6ff;
+    }
+
+    .message .meta .tag.status {
+      background: #23883420;
+      color: #2ea043;
+    }
+
+    .loading-indicator {
+      align-self: flex-start;
+      padding: 12px;
+      border-radius: 8px;
+      background: #21262d;
+      border: 1px solid #30363d;
+      display: none;
+    }
+
+    .loading-indicator.active {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid #30363d;
+      border-top-color: #f78500;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .loading-text {
+      font-size: 13px;
+      color: #8b949e;
     }
 
     .chat-footer {
-      padding: 8px;
-      background: #202c33;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .flags-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      font-size: 11px;
-      color: #8696a0;
-    }
-
-    .flags-row label {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      cursor: pointer;
-    }
-
-    .flags-row input[type='checkbox'] {
-      accent-color: #25d366;
+      padding: 12px 16px;
+      background: #21262d;
+      border-top: 1px solid #30363d;
     }
 
     .input-row {
@@ -167,72 +241,347 @@
     .input-row textarea {
       flex: 1;
       resize: none;
-      height: 42px;
-      border-radius: 20px;
-      border: none;
-      padding: 8px 12px;
+      height: 56px;
+      border-radius: 8px;
+      border: 1px solid #30363d;
+      padding: 12px;
       font-size: 13px;
-      background: #111b21;
-      color: #e9edef;
+      background: #0d1117;
+      color: #c9d1d9;
       outline: none;
+      font-family: inherit;
     }
 
-    .input-row textarea::placeholder {
-      color: #4f5b63;
+    .input-row textarea:focus {
+      border-color: #58a6ff;
     }
 
     .input-row button {
-      width: 42px;
-      height: 42px;
-      border-radius: 50%;
+      width: 56px;
+      height: 56px;
+      border-radius: 8px;
       border: none;
-      background: #00a884;
+      background: #238636;
       color: #fff;
-      display: flex;
-      align-items: center;
-      justify-content: center;
       cursor: pointer;
-      font-size: 16px;
+      font-size: 18px;
+      transition: background 0.2s;
+    }
+
+    .input-row button:hover:not(:disabled) {
+      background: #2ea043;
     }
 
     .input-row button:disabled {
-      opacity: 0.6;
-      cursor: default;
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .debug-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+
+    .debug-section {
+      margin-bottom: 20px;
+    }
+
+    .debug-section-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #f78500;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .debug-card {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 8px;
+    }
+
+    .debug-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .debug-card-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+
+    .debug-card-time {
+      font-size: 11px;
+      color: #6e7681;
+    }
+
+    .debug-card-content {
+      font-size: 12px;
+      line-height: 1.6;
+      color: #c9d1d9;
+    }
+
+    .debug-card-content .key {
+      color: #79c0ff;
+    }
+
+    .debug-card-content .value {
+      color: #a5d6ff;
+    }
+
+    .debug-card-content .success {
+      color: #2ea043;
+    }
+
+    .debug-card-content .error {
+      color: #f85149;
+    }
+
+    .debug-card-content .warning {
+      color: #f78500;
+    }
+
+    .workflow-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .workflow-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .step-indicator {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .step-indicator.pending {
+      background: #30363d;
+      color: #6e7681;
+    }
+
+    .step-indicator.active {
+      background: #f7850020;
+      color: #f78500;
+      border: 2px solid #f78500;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    .step-indicator.completed {
+      background: #23883420;
+      color: #2ea043;
+    }
+
+    .step-indicator.error {
+      background: #da364620;
+      color: #f85149;
+    }
+
+    .step-content {
+      flex: 1;
+    }
+
+    .step-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #c9d1d9;
+      margin-bottom: 4px;
+    }
+
+    .step-description {
+      font-size: 11px;
+      color: #8b949e;
+    }
+
+    .step-details {
+      margin-top: 8px;
+      padding: 8px;
+      background: #161b22;
+      border-radius: 4px;
+      border-left: 3px solid #30363d;
+      font-size: 11px;
+    }
+
+    .step-details.completed {
+      border-left-color: #2ea043;
+    }
+
+    .step-details.error {
+      border-left-color: #f85149;
+    }
+
+    .validation-issues {
+      list-style: none;
+      padding: 0;
+      margin: 8px 0 0 0;
+    }
+
+    .validation-issues li {
+      padding: 6px 8px;
+      margin-bottom: 4px;
+      border-radius: 4px;
+      font-size: 11px;
+    }
+
+    .validation-issues li.critical {
+      background: #da364620;
+      color: #f85149;
+      border-left: 3px solid #f85149;
+    }
+
+    .validation-issues li.high {
+      background: #f7850020;
+      color: #f78500;
+      border-left: 3px solid #f78500;
+    }
+
+    .validation-issues li.medium {
+      background: #ffd60a20;
+      color: #ffd60a;
+      border-left: 3px solid #ffd60a;
+    }
+
+    .validation-issues li.low {
+      background: #58a6ff20;
+      color: #58a6ff;
+      border-left: 3px solid #58a6ff;
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #0d1117;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #30363d;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #484f58;
     }
   </style>
 </head>
 
 <body>
-  <div class="chat-container">
-    <header class="chat-header">
-      <div class="chat-header-top">
-        <div class="avatar">L</div>
-        <div class="chat-title">
-          <strong>Luvia Deep Agent</strong>
-          <span>Simulação de WhatsApp / Telegram</span>
+  <div class="debug-container">
+    <!-- Chat Panel -->
+    <div class="chat-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          💬 Chat Interface
+          <span class="status-badge idle" id="chatStatus">IDLE</span>
         </div>
       </div>
-      <div class="config-row">
-        <input id="teamId" type="text" placeholder="team_id (ex: 287dca6a-f936-42df-b265-e25f97314259)" />
-        <input id="phone" type="text" placeholder="phone (ex: 5521982553238)" />
-      </div>
-    </header>
 
-    <main class="chat-body" id="messages"></main>
-
-    <footer class="chat-footer">
-      <div class="flags-row">
-        <label>
+      <div class="config-section">
+        <div class="config-row">
+          <input id="teamId" type="text" placeholder="team_id (ex: 287dca6a-f936-42df-b265-e25f97314259)" value="287dca6a-f936-42df-b265-e25f97314259" />
+        </div>
+        <div class="config-row">
+          <input id="phone" type="text" placeholder="phone (ex: 5567996261975)" value="5567996261975" />
+        </div>
+        <div class="checkbox-row">
           <input id="userConfirmation" type="checkbox" />
-          Resposta a uma pergunta de clarificação
-        </label>
-        <span id="statusLabel"></span>
+          <label for="userConfirmation">Resposta a uma pergunta de clarificação</label>
+        </div>
       </div>
-      <div class="input-row">
-        <textarea id="messageInput" placeholder="Digite uma mensagem..."></textarea>
-        <button id="sendBtn">➤</button>
+
+      <main class="chat-body" id="messages">
+        <div class="loading-indicator" id="loadingIndicator">
+          <div class="spinner"></div>
+          <div class="loading-text" id="loadingText">Processando mensagem...</div>
+        </div>
+      </main>
+
+      <footer class="chat-footer">
+        <div class="input-row">
+          <textarea id="messageInput" placeholder="Digite uma mensagem..."></textarea>
+          <button id="sendBtn">➤</button>
+        </div>
+      </footer>
+    </div>
+
+    <!-- Debug Panel -->
+    <div class="debug-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          🔍 Debug Console
+          <span class="status-badge idle" id="debugStatus">IDLE</span>
+        </div>
       </div>
-    </footer>
+
+      <div class="debug-body" id="debugBody">
+        <!-- Workflow Timeline -->
+        <div class="debug-section">
+          <div class="debug-section-title">⚙️ Workflow Timeline</div>
+          <div class="workflow-timeline" id="workflowTimeline">
+            <div class="workflow-step">
+              <div class="step-indicator pending">1</div>
+              <div class="step-content">
+                <div class="step-title">Security & Enrichment</div>
+                <div class="step-description">Validação de segurança, identificação de produto e enriquecimento de contexto</div>
+              </div>
+            </div>
+            <div class="workflow-step">
+              <div class="step-indicator pending">2</div>
+              <div class="step-content">
+                <div class="step-title">Deep Agent Routing</div>
+                <div class="step-description">Análise e roteamento para sub-agente apropriado</div>
+              </div>
+            </div>
+            <div class="workflow-step">
+              <div class="step-indicator pending">3</div>
+              <div class="step-content">
+                <div class="step-title">Guardrail Validation</div>
+                <div class="step-description">Validação de PII, alucinações e promessas não autorizadas</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Latest Response Debug Info -->
+        <div class="debug-section">
+          <div class="debug-section-title">📊 Latest Response Debug Info</div>
+          <div id="latestDebugInfo">
+            <div class="debug-card">
+              <div class="debug-card-content" style="color: #6e7681; text-align: center;">
+                Aguardando primeira mensagem...
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Request/Response Log -->
+        <div class="debug-section">
+          <div class="debug-section-title">📝 Request/Response Log</div>
+          <div id="requestLog"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -242,19 +591,200 @@
     const messageInputEl = document.getElementById('messageInput');
     const sendBtnEl = document.getElementById('sendBtn');
     const userConfirmationEl = document.getElementById('userConfirmation');
-    const statusLabelEl = document.getElementById('statusLabel');
+    const chatStatusEl = document.getElementById('chatStatus');
+    const debugStatusEl = document.getElementById('debugStatus');
+    const loadingIndicatorEl = document.getElementById('loadingIndicator');
+    const loadingTextEl = document.getElementById('loadingText');
+    const workflowTimelineEl = document.getElementById('workflowTimeline');
+    const latestDebugInfoEl = document.getElementById('latestDebugInfo');
+    const requestLogEl = document.getElementById('requestLog');
+
+    let requestCount = 0;
+
+    function updateStatus(status, text = '') {
+      chatStatusEl.className = 'status-badge ' + status;
+      debugStatusEl.className = 'status-badge ' + status;
+
+      switch(status) {
+        case 'thinking':
+          chatStatusEl.textContent = 'PENSANDO';
+          debugStatusEl.textContent = 'PROCESSANDO';
+          break;
+        case 'success':
+          chatStatusEl.textContent = 'SUCESSO';
+          debugStatusEl.textContent = 'COMPLETO';
+          setTimeout(() => updateStatus('idle'), 3000);
+          break;
+        case 'error':
+          chatStatusEl.textContent = 'ERRO';
+          debugStatusEl.textContent = 'ERRO';
+          setTimeout(() => updateStatus('idle'), 3000);
+          break;
+        default:
+          chatStatusEl.textContent = 'IDLE';
+          debugStatusEl.textContent = 'IDLE';
+      }
+    }
+
+    function updateWorkflowStep(stepNumber, status, details = '') {
+      const steps = workflowTimelineEl.querySelectorAll('.workflow-step');
+      if (steps[stepNumber - 1]) {
+        const indicator = steps[stepNumber - 1].querySelector('.step-indicator');
+        indicator.className = 'step-indicator ' + status;
+
+        const content = steps[stepNumber - 1].querySelector('.step-content');
+
+        // Remove existing details
+        const existingDetails = content.querySelector('.step-details');
+        if (existingDetails) {
+          existingDetails.remove();
+        }
+
+        // Add new details if provided
+        if (details) {
+          const detailsEl = document.createElement('div');
+          detailsEl.className = 'step-details ' + (status === 'completed' ? 'completed' : status === 'error' ? 'error' : '');
+          detailsEl.textContent = details;
+          content.appendChild(detailsEl);
+        }
+      }
+    }
+
+    function resetWorkflowTimeline() {
+      const steps = workflowTimelineEl.querySelectorAll('.workflow-step');
+      steps.forEach((step, index) => {
+        const indicator = step.querySelector('.step-indicator');
+        indicator.className = 'step-indicator pending';
+
+        const content = step.querySelector('.step-content');
+        const existingDetails = content.querySelector('.step-details');
+        if (existingDetails) {
+          existingDetails.remove();
+        }
+      });
+    }
 
     function appendMessage(text, role, meta) {
+      // Remove loading indicator
+      loadingIndicatorEl.classList.remove('active');
+
       const div = document.createElement('div');
       div.className = 'message ' + role;
-      div.textContent = text;
+
+      const textNode = document.createTextNode(text);
+      div.appendChild(textNode);
+
       if (meta) {
-        const small = document.createElement('small');
-        small.textContent = meta;
-        div.appendChild(small);
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'meta';
+
+        if (meta.agent_used) {
+          const agentTag = document.createElement('span');
+          agentTag.className = 'tag agent-used';
+          agentTag.textContent = `Agent: ${meta.agent_used}`;
+          metaDiv.appendChild(agentTag);
+        }
+
+        if (meta.workflow_status) {
+          const statusTag = document.createElement('span');
+          statusTag.className = 'tag status';
+          statusTag.textContent = `Status: ${meta.workflow_status}`;
+          metaDiv.appendChild(statusTag);
+        }
+
+        if (meta.needs_human !== undefined) {
+          const humanTag = document.createElement('span');
+          humanTag.className = 'tag';
+          humanTag.textContent = `Escalado: ${meta.needs_human ? 'Sim' : 'Não'}`;
+          metaDiv.appendChild(humanTag);
+        }
+
+        div.appendChild(metaDiv);
       }
+
       messagesEl.appendChild(div);
       messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function updateLatestDebugInfo(data) {
+      latestDebugInfoEl.innerHTML = '';
+
+      const card = document.createElement('div');
+      card.className = 'debug-card';
+
+      const content = document.createElement('div');
+      content.className = 'debug-card-content';
+
+      let html = '';
+
+      html += `<div><span class="key">Workflow Status:</span> <span class="${data.workflow_status === 'success' ? 'success' : data.workflow_status === 'error' ? 'error' : 'warning'}">${data.workflow_status || 'N/A'}</span></div>`;
+      html += `<div><span class="key">Agent Used:</span> <span class="value">${data.agent_used || 'N/A'}</span></div>`;
+      html += `<div><span class="key">Needs Human:</span> <span class="${data.needs_human ? 'warning' : 'success'}">${data.needs_human ? 'Sim' : 'Não'}</span></div>`;
+
+      if (data.ticket_id) {
+        html += `<div><span class="key">Ticket ID:</span> <span class="value">${data.ticket_id}</span></div>`;
+      }
+
+      if (data.validation_issues && data.validation_issues.length > 0) {
+        html += `<div style="margin-top: 12px;"><span class="key">Validation Issues:</span></div>`;
+        html += '<ul class="validation-issues">';
+        data.validation_issues.forEach(issue => {
+          html += `<li class="${issue.severity}">[${issue.severity.toUpperCase()}] ${issue.type}: ${issue.description}</li>`;
+        });
+        html += '</ul>';
+      }
+
+      content.innerHTML = html;
+      card.appendChild(content);
+      latestDebugInfoEl.appendChild(card);
+    }
+
+    function logRequest(requestData, responseData, duration) {
+      requestCount++;
+
+      const card = document.createElement('div');
+      card.className = 'debug-card';
+
+      const header = document.createElement('div');
+      header.className = 'debug-card-header';
+
+      const title = document.createElement('div');
+      title.className = 'debug-card-title';
+      title.textContent = `Request #${requestCount}`;
+
+      const time = document.createElement('div');
+      time.className = 'debug-card-time';
+      time.textContent = `${duration}ms - ${new Date().toLocaleTimeString()}`;
+
+      header.appendChild(title);
+      header.appendChild(time);
+
+      const content = document.createElement('div');
+      content.className = 'debug-card-content';
+
+      let html = '';
+      html += `<div><span class="key">Message:</span> "${requestData.message}"</div>`;
+      html += `<div><span class="key">Team ID:</span> ${requestData.team_id.substring(0, 8)}...</div>`;
+      html += `<div><span class="key">Phone:</span> ${requestData.phone}</div>`;
+
+      if (requestData.user_confirmation) {
+        html += `<div><span class="key">User Confirmation:</span> <span class="warning">Yes</span></div>`;
+      }
+
+      html += `<div style="margin-top: 8px;"><span class="key">Response Length:</span> ${responseData.response ? responseData.response.length : 0} chars</div>`;
+      html += `<div><span class="key">Status:</span> <span class="${responseData.workflow_status === 'success' ? 'success' : 'error'}">${responseData.workflow_status}</span></div>`;
+
+      content.innerHTML = html;
+
+      card.appendChild(header);
+      card.appendChild(content);
+
+      requestLogEl.insertBefore(card, requestLogEl.firstChild);
+
+      // Keep only last 5 requests
+      while (requestLogEl.children.length > 5) {
+        requestLogEl.removeChild(requestLogEl.lastChild);
+      }
     }
 
     async function sendMessage() {
@@ -268,40 +798,74 @@
         return;
       }
 
+      const requestData = { team_id, phone, message, user_confirmation };
+
       appendMessage(message, 'user');
       messageInputEl.value = '';
       userConfirmationEl.checked = false;
       sendBtnEl.disabled = true;
-      statusLabelEl.textContent = 'Enviando...';
+
+      // Show loading indicator
+      loadingIndicatorEl.classList.add('active');
+      loadingTextEl.textContent = 'Processando mensagem...';
+
+      // Update status
+      updateStatus('thinking');
+
+      // Reset and update workflow timeline
+      resetWorkflowTimeline();
+      updateWorkflowStep(1, 'active', 'Validando segurança e enriquecendo contexto...');
+
+      const startTime = Date.now();
 
       try {
+        // Simulate workflow progress
+        setTimeout(() => {
+          updateWorkflowStep(1, 'completed', 'Contexto enriquecido com sucesso');
+          updateWorkflowStep(2, 'active', 'Roteando para agente apropriado...');
+          loadingTextEl.textContent = 'Agente processando...';
+        }, 500);
+
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            team_id,
-            phone,
-            message,
-            user_confirmation,
-          }),
+          body: JSON.stringify(requestData),
         });
 
         const data = await res.json();
+        const duration = Date.now() - startTime;
 
         if (!res.ok) {
           console.error('Erro na API:', data);
-          appendMessage('Erro ao processar a mensagem.', 'agent', data.error || '');
+          updateStatus('error');
+          updateWorkflowStep(2, 'error', `Erro: ${data.error || 'Erro desconhecido'}`);
+          appendMessage('Erro ao processar a mensagem.', 'agent', { error: data.error || '' });
         } else {
+          updateStatus('success');
+          updateWorkflowStep(2, 'completed', `Agente: ${data.agent_used}`);
+          updateWorkflowStep(3, 'completed', 'Validações de segurança OK');
+
           const text = data.response || '(sem resposta)';
-          const meta = `valid=${data.valid}, missing_link=${data.missing_link}`;
+          const meta = {
+            agent_used: data.agent_used,
+            workflow_status: data.workflow_status,
+            needs_human: data.needs_human,
+          };
+
           appendMessage(text, 'agent', meta);
+          updateLatestDebugInfo(data);
+          logRequest(requestData, data, duration);
         }
       } catch (err) {
         console.error(err);
+        const duration = Date.now() - startTime;
+        updateStatus('error');
+        updateWorkflowStep(2, 'error', 'Erro de rede');
         appendMessage('Erro de rede ao chamar a API.', 'agent');
+        logRequest(requestData, { workflow_status: 'error', response: 'Network error' }, duration);
       } finally {
         sendBtnEl.disabled = false;
-        statusLabelEl.textContent = '';
+        loadingIndicatorEl.classList.remove('active');
       }
     }
 

@@ -66,7 +66,7 @@ export const fetch_customer_purchases = createTool({
       .select('product_id, event_type, created_at')
       .eq('team_id', team_id)
       .eq('customer_phone', customer_phone)
-      .in('event_type', ['APPROVED', 'REFUND'])
+      .in('event_type', ['approved', 'refund'])
       .order('created_at', { ascending: false });
 
     if (eventsError) {
@@ -138,8 +138,8 @@ export const fetch_customer_purchases = createTool({
       };
     });
 
-    // Filter out REFUND products (customer no longer owns them)
-    const activeProducts = purchasedProducts.filter((p) => p.event_type === 'APPROVED');
+    // Filter out refund products (customer no longer owns them)
+    const activeProducts = purchasedProducts.filter((p) => p.event_type === 'approved');
 
     console.log(`\x1b[32m[FetchPurchases]\x1b[0m Customer owns ${activeProducts.length} active products`);
     if (logger) {

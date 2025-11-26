@@ -37,6 +37,7 @@ const getSupabaseClient = () => {
 const fetchCustomerProductsInputSchema = z.object({
   team_id: z.string(),
   customer_phone: z.string(),
+  event_types_filter: z.array(z.string()).optional(), // Filter by event types (e.g., ['ABANDONED'], ['APPROVED', 'REFUND'])
 });
 
 const fetchCustomerProductsOutputSchema = z.object({
@@ -53,11 +54,11 @@ const fetchCustomerProductsOutputSchema = z.object({
 
 export const fetch_customer_products = createTool({
   id: 'fetch-customer-products',
-  description: 'Fetches all products associated with a customer from customer_events, matching by product_id_plataforma',
+  description: 'Fetches products associated with a customer from customer_events, matching by product_id_plataforma. Can filter by event types (APPROVED, ABANDONED, REFUND).',
   inputSchema: fetchCustomerProductsInputSchema,
   outputSchema: fetchCustomerProductsOutputSchema,
   execute: async (inputData, context) => {
-    const { team_id, customer_phone } = inputData;
+    const { team_id, customer_phone, event_types_filter } = inputData;
     const logger = context?.mastra?.logger;
 
     console.log('fetch_customer_products 2', customer_phone, team_id);
@@ -73,15 +74,22 @@ export const fetch_customer_products = createTool({
 
     const supabase = getSupabaseClient();
 
-    // 1. Fetch all customer events (APPROVED, ABANDONED, REFUND)
-    console.log(`\x1b[36m[FetchCustomerProducts]\x1b[0m Querying customer_events for team_id=${team_id}, customer_phone=${customer_phone}`);
+    // 1. Fetch customer events (optionally filtered by event type)
+    const filterInfo = event_types_filter ? `[filtered: ${event_types_filter.join(', ')}]` : '[all types]';
+    console.log(`\x1b[36m[FetchCustomerProducts]\x1b[0m Querying customer_events for team_id=${team_id}, customer_phone=${customer_phone} ${filterInfo}`);
 
-    const { data: eventsData, error: eventsError, count } = await supabase
+    let query = supabase
       .from('customer_events')
       .select('product_id, event_type, created_at')
       .eq('team_id', team_id)
-      .eq('customer_phone', customer_phone)
-      .order('created_at', { ascending: false })
+      .eq('customer_phone', customer_phone);
+
+    // Apply event type filter if provided
+    if (event_types_filter && event_types_filter.length > 0) {
+      query = query.in('event_type', event_types_filter);
+    }
+
+    const { data: eventsData, error: eventsError, count } = await query.order('created_at', { ascending: false })
 
     console.log('eventsData', eventsData);
     console.log('count', count);
@@ -136,18 +144,41 @@ export const fetch_customer_products = createTool({
     const platformToProductMap = new Map<string, { product_id: string; product_name: string }>();
 
     console.log(`\x1b[36m[FetchCustomerProducts]\x1b[0m Matching platform IDs...`);
+    console.log(`\x1b[36m[FetchCustomerProducts]\x1b[0m Customer event product_ids:`, platformProductIds);
+
+    // Debug: Show first few products from embeddings to understand structure
+    if (productsData && productsData.length > 0) {
+      console.log(`\x1b[36m[FetchCustomerProducts]\x1b[0m Sample product metadata (first 3):`);
+      productsData.slice(0, 3).forEach((p, i) => {
+        console.log(`\x1b[90m[FetchCustomerProducts]\x1b[0m   [${i}] metadata keys:`, Object.keys(p.metadata));
+        console.log(`\x1b[90m[FetchCustomerProducts]\x1b[0m   [${i}] nome: "${p.metadata.nome}"`);
+        console.log(`\x1b[90m[FetchCustomerProducts]\x1b[0m   [${i}] produto_plataforma_id: "${(p.metadata as any).produto_plataforma_id}"`);
+        console.log(`\x1b[90m[FetchCustomerProducts]\x1b[0m   [${i}] product_id_plataforma: "${p.metadata.product_id_plataforma}"`);
+      });
+    }
 
     for (const product of productsData || []) {
       // Try both field names (produto_plataforma_id is the correct one in DB)
       const platformId = (product.metadata as any).produto_plataforma_id || product.metadata.product_id_plataforma;
-      console.log(`\x1b[90m[FetchCustomerProducts]\x1b[0m   Product "${product.metadata.nome}" has platform_id: ${platformId}`);
+      const productName = product.metadata.nome || '';
+
+      console.log(`\x1b[90m[FetchCustomerProducts]\x1b[0m   Checking: "${productName}" (internal_id: ${product.product_id}, platform_id: ${platformId})`);
+
+      if (!productName) {
+        console.error(`\x1b[31m[FetchCustomerProducts]\x1b[0m   ⚠️ ERROR: Product has EMPTY nome field! Internal ID: ${product.product_id}`);
+        console.error(`\x1b[31m[FetchCustomerProducts]\x1b[0m   Full metadata:`, JSON.stringify(product.metadata, null, 2));
+      }
 
       if (platformId && platformProductIds.includes(platformId)) {
         console.log(`\x1b[32m[FetchCustomerProducts]\x1b[0m   ✓ MATCH! Platform ID ${platformId} found in customer events`);
         platformToProductMap.set(platformId, {
           product_id: product.product_id,
-          product_name: product.metadata.nome,
+          product_name: productName,
         });
+      } else if (!platformId) {
+        console.log(`\x1b[33m[FetchCustomerProducts]\x1b[0m   ✗ SKIP: Product "${productName}" has NO platform_id in metadata`);
+      } else {
+        console.log(`\x1b[33m[FetchCustomerProducts]\x1b[0m   ✗ SKIP: Platform ID ${platformId} not in customer events`);
       }
     }
 
@@ -167,7 +198,12 @@ export const fetch_customer_products = createTool({
       .map(event => {
         const productInfo = platformToProductMap.get(event.product_id);
         if (!productInfo) {
+          console.log(`\x1b[33m[FetchCustomerProducts]\x1b[0m   ⚠️ Event with platform_id ${event.product_id} has no matching product in embeddings`);
           return null;
+        }
+
+        if (!productInfo.product_name || productInfo.product_name.trim() === '') {
+          console.error(`\x1b[31m[FetchCustomerProducts]\x1b[0m   ⚠️ ERROR: Matched product has EMPTY name! UUID: ${productInfo.product_id}, platform_id: ${event.product_id}`);
         }
 
         return {
@@ -182,7 +218,7 @@ export const fetch_customer_products = createTool({
 
     console.log(`\x1b[32m[FetchCustomerProducts]\x1b[0m ✅ Final result: ${products.length} products matched for customer`);
     products.forEach(p => {
-      console.log(`\x1b[32m[FetchCustomerProducts]\x1b[0m   - ${p.product_name} (${p.event_type}) [platform_id: ${p.product_id_plataforma}]`);
+      console.log(`\x1b[32m[FetchCustomerProducts]\x1b[0m   - "${p.product_name}" (${p.event_type}) [platform_id: ${p.product_id_plataforma}, uuid: ${p.product_id}]`);
     });
 
     return {

@@ -4,7 +4,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { CohereClient } from 'cohere-ai';
 import type { ProductMetadata } from '../../types/luvia.types';
-import { cosineSimilarity } from '../utils/vector-search';
+import { searchProductsHybrid } from '../utils/supabase-hybrid-search';
+import type { ProductHybridResult } from '../../types/hybrid-search.types';
 
 interface ProductCandidate {
   product_id: string;
@@ -15,6 +16,19 @@ interface ProductCandidate {
 interface CustomerEventRow {
   product_id: string;
 }
+
+/**
+ * Formats price from cents to BRL currency format
+ * @param priceInCents - Price in cents (e.g., 4788 = R$ 47,88)
+ * @returns Formatted price string (e.g., "R$ 47,88")
+ */
+const formatPriceToBRL = (priceInCents: number): string => {
+  const priceInReais = priceInCents / 100;
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(priceInReais);
+};
 
 let supabaseClient: SupabaseClient | null = null;
 let openaiClient: OpenAI | null = null;
@@ -101,92 +115,75 @@ const generateEmbedding = async (message: string, logger?: any) => {
   return embedding;
 };
 
+/**
+ * Fetch product candidates using hybrid search (vector + BM25)
+ * This replaces the old client-side similarity calculation with server-side RPC
+ */
 const fetchProductCandidates = async (
   teamId: string,
+  message: string,
   embedding: number[],
   logger?: any,
 ): Promise<ProductCandidate[]> => {
-  const supabase = getSupabaseClient();
   const startTime = Date.now();
 
-  // Fetch all product embeddings for the team
-  const sql = `SELECT product_id, metadata, embedding FROM product_embeddings WHERE team_id = '${teamId}'`;
-  console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m Fetching product_embeddings for team=${teamId}`);
-  console.log(`\x1b[90m[SQL]\x1b[0m ${sql}`);
+  console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m Using hybrid search (vector + BM25) for team=${teamId}`);
+  console.log(`\x1b[90m[RPC]\x1b[0m match_products_hybrid - query: "${message.substring(0, 50)}..."`);
   if (logger) {
-    logger.info(`[Supabase] Executing query: fetchProductEmbeddings - team_id: ${teamId}`);
+    logger.info(`[Supabase RPC] Executing: match_products_hybrid - team_id: ${teamId}`);
   }
 
-  const { data, error } = await supabase
-    .from('product_embeddings')
-    .select('product_id, metadata, embedding')
-    .eq('team_id', teamId);
+  try {
+    const results = await searchProductsHybrid({
+      queryEmbedding: embedding,
+      queryText: message,
+      teamId,
+      matchThreshold: 0.15,
+      bm25Weight: 0.3,
+      vectorWeight: 0.7,
+      resultLimit: 20,
+    }, { logger });
 
-  if (error) {
-    console.error(`\x1b[31m[AdvancedProductSearch]\x1b[0m Query FAILED: ${error.message}`);
+    const duration = Date.now() - startTime;
+
+    if (results.length === 0) {
+      console.log(`\x1b[33m[AdvancedProductSearch]\x1b[0m No products found for team=${teamId} | ${duration}ms`);
+      if (logger) {
+        logger.warn(`[Supabase RPC] No products found - team_id: ${teamId}, duration: ${duration}ms`);
+      }
+      return [];
+    }
+
+    console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m Hybrid search OK: ${results.length} results | ${duration}ms`);
     if (logger) {
-      logger.error(`[Supabase] Query failed: fetchProductEmbeddings - ${error.message}`);
+      logger.info(`[Supabase RPC] Query completed: ${results.length} results, ${duration}ms`);
+    }
+
+    // Convert hybrid results to ProductCandidate format
+    // Use combined_score from hybrid search as similarity
+    const candidates: ProductCandidate[] = results.map((result) => ({
+      product_id: result.product_id,
+      metadata: result.metadata as ProductMetadata,
+      similarity: result.combined_score,
+    }));
+
+    // Already sorted by combined_score from RPC, take top 10
+    const topCandidates = candidates.slice(0, 10);
+
+    if (logger) {
+      logger.info(`Hybrid search identified top ${topCandidates.length} candidates.`);
+      logger.info(`Top result: ${topCandidates[0]?.metadata?.nome || 'N/A'} (score: ${topCandidates[0]?.similarity?.toFixed(3) || 'N/A'}, vector: ${results[0]?.similarity?.toFixed(3)}, bm25: ${results[0]?.bm25_score?.toFixed(3)})`);
+    }
+
+    return topCandidates;
+  } catch (error: any) {
+    const duration = Date.now() - startTime;
+    console.error(`\x1b[31m[AdvancedProductSearch]\x1b[0m Hybrid search FAILED: ${error.message} | ${duration}ms`);
+    if (logger) {
+      logger.error(`[Supabase RPC] match_products_hybrid failed - ${error.message}`);
     }
     throw error;
   }
-
-  const duration = Date.now() - startTime;
-
-  if (!data || data.length === 0) {
-    console.log(`\x1b[33m[AdvancedProductSearch]\x1b[0m No products found for team=${teamId} | ${duration}ms`);
-    if (logger) {
-      logger.warn(`[Supabase] No products found - team_id: ${teamId}, duration: ${duration}ms`);
-    }
-    return [];
-  }
-
-  console.log(`\x1b[36m[AdvancedProductSearch]\x1b[0m Query OK: product_embeddings | ${data.length} rows | ${duration}ms`);
-  if (logger) {
-    logger.info(`[Supabase] Query completed: fetchProductEmbeddings - ${data.length} rows, ${duration}ms`);
-  }
-
-  // Calculate similarity locally
-  const scoredCandidates = data
-    .map((row: any) => {
-      let similarity = 0;
-      let embeddingVector = row.embedding;
-
-      // Parse embedding if it's a string (Supabase returns pgvector as string)
-      if (typeof embeddingVector === 'string') {
-        try {
-          // Remove brackets and split by comma
-          embeddingVector = embeddingVector
-            .replace(/^\[/, '')
-            .replace(/\]$/, '')
-            .split(',')
-            .map((v: string) => parseFloat(v.trim()));
-        } catch (e) {
-          console.warn(`\x1b[33m[AdvancedProductSearch]\x1b[0m Failed to parse embedding string for product ${row.product_id}`);
-        }
-      }
-
-      if (Array.isArray(embeddingVector) && embeddingVector.length === embedding.length) {
-        try {
-          similarity = cosineSimilarity(embedding, embeddingVector);
-        } catch (e) {
-          console.warn(`\x1b[33m[AdvancedProductSearch]\x1b[0m Similarity calculation failed for product ${row.product_id}:`, e);
-        }
-      }
-
-      return {
-        product_id: row.product_id,
-        metadata: row.metadata,
-        similarity,
-      };
-    })
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, 10); // Keep top 10
-
-  if (logger) {
-    logger.info(`Client-side search identified top ${scoredCandidates.length} candidates.`);
-  }
-
-  return scoredCandidates;
 };
 
 const fetchRecentProductsForCustomer = async (teamId: string, customerPhone?: string, logger?: any) => {
@@ -262,7 +259,7 @@ const rerankCandidates = async (
         const metadata = candidate.metadata;
         const name = metadata.nome ?? '';
         const page = metadata.pagina_vendas ?? '';
-        const price = typeof metadata.preco === 'number' ? `R$ ${metadata.preco}` : '';
+        const price = typeof metadata.preco === 'number' ? formatPriceToBRL(metadata.preco) : '';
 
         return `${name} ${page} ${price}`.trim();
       });
@@ -347,7 +344,7 @@ export const advanced_product_search = createTool({
 
     try {
       const embedding = await generateEmbedding(message, logger);
-      const candidates = await fetchProductCandidates(team_id, embedding, logger);
+      const candidates = await fetchProductCandidates(team_id, message, embedding, logger);
       const recentProductIds = await fetchRecentProductsForCustomer(team_id, customer_phone, logger);
 
       const { best, isAmbiguous, needsConfirmation } = await rerankCandidates(

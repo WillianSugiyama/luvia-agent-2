@@ -11,6 +11,7 @@ import { docsAgent } from './agents/docs-agent';
 import { dontKnowAgent } from './agents/dont-know-agent';
 import { guardrailAgent } from './agents/guardrail-agent';
 import { deepAgent } from './agents/deep-agent';
+import { productHistoryConfirmationAgent } from './agents/product-history-confirmation-agent';
 import { Observability } from "@mastra/observability";
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -29,6 +30,7 @@ export const mastra = new Mastra({
     dontKnowAgent,
     guardrailAgent,
     deepAgent,
+    productHistoryConfirmationAgent,
   },
   storage: new LibSQLStore({
     id: 'main',

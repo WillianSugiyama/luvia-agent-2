@@ -62,6 +62,14 @@ export interface PendingContextSwitch {
   timestamp: number;
 }
 
+export interface PendingProductConfirmation {
+  suggested_product_id: string;
+  suggested_product_name: string;
+  event_type: 'ABANDONED' | 'APPROVED' | 'REFUND';
+  reason: string; // 'customer_history' | 'single_product' | 'multi_product_selected'
+  timestamp: number;
+}
+
 export interface ConversationState {
   conversation_id: string;
   current_product_id: string | null;
@@ -74,4 +82,5 @@ export interface ConversationState {
   active_support_product_id: string | null;       // Product actively being supported
   support_mode_since: number | null;              // Timestamp when support mode started
   pending_context_switch: PendingContextSwitch | null; // Pending confirmation for context switch
+  pending_product_confirmation: PendingProductConfirmation | null; // Pending confirmation for product from history
 }

@@ -8,6 +8,7 @@ import { salesAgent, supportAgent, clarificationAgent } from './sales-support-ag
 import { docsAgent } from './docs-agent';
 import { dontKnowAgent } from './dont-know-agent';
 import { contextSwitchConfirmationAgent } from './context-switch-confirmation-agent';
+import { productHistoryConfirmationAgent } from './product-history-confirmation-agent';
 
 // Importar tools
 import { search_knowledge_tool } from '../tools/search-knowledge-tool';
@@ -58,6 +59,12 @@ export const deepAgent = new Agent({
       to_mode?: string;
     } | undefined;
 
+    // Pending product confirmation (from conversation state)
+    const pendingProductConfirmation = requestContext?.get?.('pending_product_confirmation') as {
+      suggested_product_name?: string;
+      event_type?: string;
+    } | undefined;
+
     return `
 Você é o DEEP AGENT - o cérebro central do sistema de atendimento.
 
@@ -73,6 +80,7 @@ MULTI-PRODUCT CONTEXT:
 - Produtos comprados: ${purchasedProducts.length > 0 ? purchasedProducts.join(', ') : 'Nenhum'}
 - Ownership do produto atual: ${activeProductOwnership}
 - Troca de contexto pendente: ${pendingSwitch ? `${pendingSwitch.from_product_name} (${pendingSwitch.from_mode}) → ${pendingSwitch.to_product_name} (${pendingSwitch.to_mode})` : 'Nenhuma'}
+- Confirmação de produto pendente: ${pendingProductConfirmation ? `${pendingProductConfirmation.suggested_product_name} (${pendingProductConfirmation.event_type})` : 'Nenhuma'}
 
 SEU PAPEL:
 Você NÃO responde diretamente ao usuário. Você ANALISA e ROTEIA para o agente especializado correto.
@@ -112,6 +120,11 @@ AGENTES DISPONÍVEIS:
    - Usuário respondeu a uma pergunta de confirmação de troca
    - Precisa interpretar se usuário confirmou, rejeitou ou está indeciso
 
+7. **productHistoryConfirmationAgent** - Use quando:
+   - Existe uma confirmação de produto pendente (veja "MULTI-PRODUCT CONTEXT")
+   - Usuário respondeu a uma pergunta sobre produto sugerido do histórico
+   - Precisa interpretar se usuário confirmou, rejeitou ou está indeciso sobre o produto sugerido
+
 FERRAMENTAS DISPONÍVEIS:
 
 - **search_knowledge_tool**: Busca semântica na base de conhecimento. USE SEMPRE antes de rotear para docsAgent.
@@ -129,6 +142,13 @@ FLUXO DE DECISÃO:
    - O usuário acabou de ser perguntado se quer trocar de produto/contexto
    - Use contextSwitchConfirmationAgent para interpretar a resposta
    - Baseado na resposta, confirme a troca ou mantenha o contexto atual
+
+0.5. **[PRIORIDADE MÁXIMA]** Se existe confirmação de produto pendente:
+   - O usuário acabou de ser perguntado se quer falar sobre o produto do histórico
+   - Use productHistoryConfirmationAgent para interpretar a resposta
+   - Se confirmou: use o produto sugerido
+   - Se rejeitou: faça busca normal de produto
+   - Se indeciso: peça mais clarificação
 
 1. Se mensagem ambígua sobre produto → clarificationAgent
 2. Se precisa buscar informação → search_knowledge_tool primeiro
@@ -171,6 +191,7 @@ IMPORTANTE:
     clarificationAgent,
     dontKnowAgent,
     contextSwitchConfirmationAgent,
+    productHistoryConfirmationAgent,
   },
   tools: {
     search_knowledge_tool,

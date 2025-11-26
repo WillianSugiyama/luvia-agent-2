@@ -92,6 +92,7 @@ const createInitialState = (
   active_support_product_id: null,
   support_mode_since: null,
   pending_context_switch: null,
+  pending_product_confirmation: null,
 });
 
 // Helper: Update purchased products cache
@@ -136,6 +137,27 @@ export const clearPendingContextSwitch = async (conversationId: string) => {
   const state = await loadConversationState(conversationId);
   if (state) {
     state.pending_context_switch = null;
+    await saveConversationState(conversationId, state);
+  }
+};
+
+// Helper: Set pending product confirmation
+export const setPendingProductConfirmation = async (
+  conversationId: string,
+  pendingConfirmation: ConversationState['pending_product_confirmation']
+) => {
+  const state = await loadConversationState(conversationId);
+  if (state) {
+    state.pending_product_confirmation = pendingConfirmation;
+    await saveConversationState(conversationId, state);
+  }
+};
+
+// Helper: Clear pending product confirmation
+export const clearPendingProductConfirmation = async (conversationId: string) => {
+  const state = await loadConversationState(conversationId);
+  if (state) {
+    state.pending_product_confirmation = null;
     await saveConversationState(conversationId, state);
   }
 };
