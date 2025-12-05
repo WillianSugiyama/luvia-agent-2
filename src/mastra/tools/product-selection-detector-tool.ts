@@ -65,9 +65,14 @@ O usuário pode selecionar de várias formas:
 
 Se o usuário NÃO está selecionando um produto (está fazendo uma pergunta nova, cumprimentando, etc.), marque is_selection como false.
 
+IMPORTANTE: O campo "selected_index" deve ser EXATAMENTE o número que aparece no início da linha do produto na lista acima.
+- Se o usuário disse "2" ou "segundo", selected_index deve ser 2 (não 1!)
+- Se o usuário disse "1" ou "primeiro", selected_index deve ser 1 (não 0!)
+- Os índices começam em 1, NÃO em 0!
+
 Responda APENAS com JSON válido:
 {
-  "selected_index": number ou null,
+  "selected_index": número do produto na lista (1, 2, 3...) ou null se não selecionou,
   "confidence": 0.0 a 1.0,
   "is_selection": boolean,
   "is_new_question": boolean,

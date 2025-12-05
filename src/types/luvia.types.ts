@@ -79,6 +79,8 @@ export interface MultiProductSelectionItem {
 
 export interface PendingMultiProductSelection {
   products: MultiProductSelectionItem[];
+  original_message: string; // The original user question/intent before product selection
+  original_intent?: string; // The detected intent type (support, pricing, etc.)
   timestamp: number;
 }
 

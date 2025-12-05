@@ -145,8 +145,18 @@ const security_and_enrich_step = createStep({
 
     // 2.1. Check for pending multi-product selection BEFORE greeting handler
     if (previousState?.pending_multi_product_selection) {
-      const pendingProducts = previousState.pending_multi_product_selection.products;
+      const pendingSelection = previousState.pending_multi_product_selection;
+      const pendingProducts = pendingSelection.products;
+      const originalMessage = pendingSelection.original_message || safeMessage;
+      const originalIntent = pendingSelection.original_intent || 'support';
+
       console.log(`[Step 2.1] Pending multi-product selection detected - ${pendingProducts.length} products`);
+      console.log(`[Step 2.1] Original message: "${originalMessage}" (intent: ${originalIntent})`);
+
+      // Debug: Log all products with their indices
+      pendingProducts.forEach((p, i) => {
+        console.log(`[Step 2.1]   Product[${i}]: index=${p.index}, name="${p.product_name}", event_type="${p.event_type}"`);
+      });
 
       // Use LLM to detect which product the user selected
       const selectionResult = await product_selection_detector.execute(
@@ -162,10 +172,14 @@ const security_and_enrich_step = createStep({
       ) as { selected_index: number | null; confidence: number; is_selection: boolean; is_new_question: boolean; detected_intent?: string };
 
       console.log(`[Step 2.1] Selection result: ${JSON.stringify(selectionResult)}`);
+      console.log(`[Step 2.1] LLM returned selected_index=${selectionResult.selected_index}`);
 
       if (selectionResult.is_selection && selectionResult.selected_index !== null) {
         // User selected a product - find it and proceed
         const selectedProduct = pendingProducts.find((p) => p.index === selectionResult.selected_index);
+
+        console.log(`[Step 2.1] Looking for product with index=${selectionResult.selected_index}`);
+        console.log(`[Step 2.1] Found product: ${selectedProduct ? JSON.stringify({ index: selectedProduct.index, name: selectedProduct.product_name }) : 'NOT FOUND'}`);
 
         if (selectedProduct) {
           console.log(`[Step 2.1] ✅ User selected product #${selectionResult.selected_index}: "${selectedProduct.product_name}"`);
@@ -173,26 +187,39 @@ const security_and_enrich_step = createStep({
           // Clear the pending selection
           await clearPendingMultiProductSelection(conversationId);
 
+          // IMPORTANT: Save the selected product as current_product_id in conversation state
+          // This prevents the system from asking "which product?" again on subsequent messages
+          await manageConversationContext.execute(
+            {
+              conversation_id: conversationId,
+              newly_identified_product_id: selectedProduct.product_id,
+            },
+            { requestContext, mastra }
+          );
+          console.log(`[Step 2.1] Saved current_product_id: ${selectedProduct.product_id}`);
+
           // Load enriched context for the selected product
+          // Use the ORIGINAL message for user_intent so the agent knows the original question
           const enrichedContext = await get_enriched_context.execute(
             {
               product_id: selectedProduct.product_id,
               team_id,
               customer_phone: sanitizedPhone ?? '',
-              user_intent: safeMessage,
+              user_intent: originalMessage, // Use original message, not "2"
             },
             { requestContext, mastra }
           ) as { product: { name: string; price: string; checkout_link: string; description?: string }; customer_status: string; rules: string[]; sales_strategy: { framework: string; instruction: string; cta_suggested: string; should_offer: boolean } };
 
           const productName = enrichedContext.product.name || selectedProduct.product_name;
           console.log(`[Step 2.1] Product loaded: "${productName}" - routing to agent`);
+          console.log(`[Step 2.1] Will answer original question: "${originalMessage}"`);
 
-          // Determine interaction type based on event_type
-          const interactionType = selectedProduct.event_type === 'approved' ? 'support' : 'sales';
+          // Determine interaction type based on event_type OR original intent
+          const interactionType = selectedProduct.event_type === 'approved' ? 'support' : originalIntent;
 
           // Store greeting data for agents (fetch it quickly)
           const greetingDataForSelection = await greeting_handler.execute(
-            { message: safeMessage, team_id, customer_phone: sanitizedPhone },
+            { message: originalMessage, team_id, customer_phone: sanitizedPhone },
             { requestContext, mastra }
           ) as { customer_name?: string; agent_name?: string; team_name?: string };
 
@@ -202,14 +229,12 @@ const security_and_enrich_step = createStep({
             team_name: greetingDataForSelection.team_name,
           });
 
-          // Create a contextual message for the agent (instead of just "2")
-          const contextualMessage = interactionType === 'support'
-            ? `Quero falar sobre o produto ${productName} que eu comprei.`
-            : `Quero saber mais sobre o produto ${productName}.`;
-
+          // Use the ORIGINAL message so the agent can answer the original question
+          // This is key: instead of "2", we pass "não tenho o link do curso" so the agent
+          // knows what to answer now that the product is confirmed
           return {
-            original_message: message,
-            sanitized_message: contextualMessage,
+            original_message: originalMessage,
+            sanitized_message: originalMessage, // Use original question, not "2"
             conversation_id: conversationId,
             team_id,
             customer_phone: sanitizedPhone,
@@ -222,7 +247,7 @@ const security_and_enrich_step = createStep({
             intent: {
               interaction_type: interactionType,
               has_clear_product: true,
-              normalized_query: safeMessage,
+              normalized_query: originalMessage,
             },
             needs_multi_product_clarification: false,
           };
@@ -501,7 +526,8 @@ const security_and_enrich_step = createStep({
 
             const clarificationMessage = `Olá! Vi que você tem os seguintes produtos:\n\n${productsList}\n\nSobre qual produto você gostaria de falar? 😊`;
 
-            // Save the product list for later selection detection
+            // Save the product list AND original message for later selection detection
+            // This allows us to answer the original question once product is selected
             const multiProductSelection = {
               products: customerProducts.map((p, i) => ({
                 index: i + 1,
@@ -509,10 +535,13 @@ const security_and_enrich_step = createStep({
                 product_name: p.product_name,
                 event_type: p.event_type,
               })),
+              original_message: safeMessage, // Save the original question (e.g., "não tenho o link do curso")
+              original_intent: intent.interaction_type, // Save the intent type
               timestamp: Date.now(),
             };
             await setPendingMultiProductSelection(conversationId, multiProductSelection);
             console.log(`[Step 5] Saved ${multiProductSelection.products.length} products for selection detection`);
+            console.log(`[Step 5] Original message saved: "${safeMessage}" (intent: ${intent.interaction_type})`);
 
             // Early return with clarification
             earlyReturnForProductSelection = {
