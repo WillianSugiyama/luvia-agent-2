@@ -2,7 +2,7 @@ import { createTool } from '@mastra/core/tools';
 import { Memory } from '@mastra/memory';
 import { LibSQLStore } from '@mastra/libsql';
 import { z } from 'zod';
-import type { ConversationState, ProductHistoryItem } from '../../types/luvia.types';
+import type { ConversationState, ProductHistoryItem, PendingMultiProductSelection } from '../../types/luvia.types';
 
 const memory = new Memory({
   storage: new LibSQLStore({
@@ -94,6 +94,7 @@ const createInitialState = (
   support_mode_since: null,
   pending_context_switch: null,
   pending_product_confirmation: null,
+  pending_multi_product_selection: null,
 });
 
 // Helper: Update purchased products cache
@@ -159,6 +160,28 @@ export const clearPendingProductConfirmation = async (conversationId: string) =>
   const state = await loadConversationState(conversationId);
   if (state) {
     state.pending_product_confirmation = null;
+    await saveConversationState(conversationId, state);
+  }
+};
+
+// Helper: Set pending multi-product selection
+export const setPendingMultiProductSelection = async (
+  conversationId: string,
+  pendingSelection: PendingMultiProductSelection
+) => {
+  let state = await loadConversationState(conversationId);
+  if (!state) {
+    state = createInitialState(conversationId, '');
+  }
+  state.pending_multi_product_selection = pendingSelection;
+  await saveConversationState(conversationId, state);
+};
+
+// Helper: Clear pending multi-product selection
+export const clearPendingMultiProductSelection = async (conversationId: string) => {
+  const state = await loadConversationState(conversationId);
+  if (state) {
+    state.pending_multi_product_selection = null;
     await saveConversationState(conversationId, state);
   }
 };

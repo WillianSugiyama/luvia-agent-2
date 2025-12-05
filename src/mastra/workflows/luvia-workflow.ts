@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { inputSchema as luviaInputSchema } from '../../schemas/input.schema';
 import { validate_security_layer } from '../tools/security-tool';
 import { advanced_product_search } from '../tools/advanced-product-search-tool';
-import { manageConversationContext, loadConversationState, updatePurchasedProducts, setActiveSupportProduct, setPendingContextSwitch, setPendingProductConfirmation, clearPendingProductConfirmation } from '../tools/manage-conversation-context-tool';
+import { manageConversationContext, loadConversationState, updatePurchasedProducts, setActiveSupportProduct, setPendingContextSwitch, setPendingProductConfirmation, clearPendingProductConfirmation, setPendingMultiProductSelection, clearPendingMultiProductSelection } from '../tools/manage-conversation-context-tool';
+import { product_selection_detector } from '../tools/product-selection-detector-tool';
 import { get_enriched_context } from '../tools/get-enriched-context-tool';
 import { interpret_user_message } from '../tools/interpret-message-tool';
 import { detect_pii_tool } from '../tools/detect-pii-tool';
@@ -139,16 +140,32 @@ const security_and_enrich_step = createStep({
       logger.info(`[Step 1] Security passed - conversationId: ${conversationId}`);
     }
 
-    // 2. Check for greetings (early return if detected)
+    // 2. Check for greetings using LLM (early return if ONLY a greeting)
     const greetingResult = await greeting_handler.execute(
-      { message: safeMessage, team_id },
+      { message: safeMessage, team_id, customer_phone: sanitizedPhone },
       { requestContext, mastra }
-    ) as { is_greeting: boolean; team_name?: string; response?: string };
+    ) as {
+      is_greeting_only: boolean;
+      has_question_or_intent: boolean;
+      customer_name?: string;
+      team_name?: string;
+      agent_name?: string;
+      response?: string;
+    };
 
-    if (greetingResult.is_greeting && greetingResult.response) {
-      console.log(`[Step 1] Greeting detected - returning welcome message`);
+    // Store greeting data for agents to use (customer_name, agent_name)
+    const greetingData = {
+      customer_name: greetingResult.customer_name,
+      agent_name: greetingResult.agent_name,
+      team_name: greetingResult.team_name,
+    };
+    requestContext.set('greeting_data', greetingData);
+    console.log(`[Step 1] Greeting data stored: ${JSON.stringify(greetingData)}`);
+
+    if (greetingResult.is_greeting_only && greetingResult.response) {
+      console.log(`[Step 1] Simple greeting detected - returning humanized welcome message`);
       if (logger) {
-        logger.info(`[Step 1] Greeting detected for team ${greetingResult.team_name}`);
+        logger.info(`[Step 1] Simple greeting detected for team ${greetingResult.team_name}, agent ${greetingResult.agent_name}`);
       }
 
       // Return a minimal enriched context with the greeting response
@@ -190,6 +207,81 @@ const security_and_enrich_step = createStep({
 
     // 3. Load Previous State
     const previousState = await loadConversationState(conversationId);
+
+    // 3.3. Check for pending multi-product selection (user selecting from list)
+    if (previousState?.pending_multi_product_selection) {
+      const pendingProducts = previousState.pending_multi_product_selection.products;
+      console.log(`[Step 3.3] Pending multi-product selection detected - ${pendingProducts.length} products`);
+
+      // Use LLM to detect which product the user selected
+      const selectionResult = await product_selection_detector.execute(
+        {
+          message: safeMessage,
+          products: pendingProducts.map((p) => ({
+            index: p.index,
+            product_name: p.product_name,
+            event_type: p.event_type,
+          })),
+        },
+        { requestContext, mastra }
+      ) as { selected_index: number | null; confidence: number; is_selection: boolean; is_new_question: boolean; detected_intent?: string };
+
+      console.log(`[Step 3.3] Selection result: ${JSON.stringify(selectionResult)}`);
+
+      if (selectionResult.is_selection && selectionResult.selected_index !== null) {
+        // User selected a product - find it and proceed
+        const selectedProduct = pendingProducts.find((p) => p.index === selectionResult.selected_index);
+
+        if (selectedProduct) {
+          console.log(`[Step 3.3] ✅ User selected product #${selectionResult.selected_index}: "${selectedProduct.product_name}"`);
+
+          // Clear the pending selection
+          await clearPendingMultiProductSelection(conversationId);
+
+          // Load enriched context for the selected product
+          const enrichedContext = await get_enriched_context.execute(
+            {
+              product_id: selectedProduct.product_id,
+              team_id,
+              customer_phone: sanitizedPhone ?? '',
+              user_intent: safeMessage,
+            },
+            { requestContext, mastra }
+          ) as { product: { name: string; price: string; checkout_link: string; description?: string }; customer_status: string; rules: string[]; sales_strategy: { framework: string; instruction: string; cta_suggested: string; should_offer: boolean } };
+
+          const productName = enrichedContext.product.name || selectedProduct.product_name;
+          console.log(`[Step 3.3] Product loaded: "${productName}" - routing to agent`);
+
+          // Determine interaction type based on event_type
+          const interactionType = selectedProduct.event_type === 'approved' ? 'support' : 'sales';
+
+          return {
+            original_message: message,
+            sanitized_message: safeMessage,
+            conversation_id: conversationId,
+            team_id,
+            customer_phone: sanitizedPhone,
+            customer_email: email,
+            product_id: selectedProduct.product_id,
+            product_name: productName,
+            enriched_context: enrichedContext,
+            is_ambiguous: false,
+            needs_confirmation: false,
+            intent: {
+              interaction_type: interactionType,
+              has_clear_product: true,
+              normalized_query: safeMessage,
+            },
+            needs_multi_product_clarification: false,
+          };
+        }
+      } else if (selectionResult.is_new_question) {
+        // User is asking something new - clear the pending selection and continue
+        console.log(`[Step 3.3] User asking new question - clearing pending selection`);
+        await clearPendingMultiProductSelection(conversationId);
+      }
+      // If not a clear selection and not a new question, keep the pending selection for next turn
+    }
 
     // 3.5. Check for pending product confirmation (PRIORITY)
     if (previousState?.pending_product_confirmation) {
@@ -386,6 +478,19 @@ const security_and_enrich_step = createStep({
               .join('\n');
 
             const clarificationMessage = `Olá! Vi que você tem os seguintes produtos:\n\n${productsList}\n\nSobre qual produto você gostaria de falar? 😊`;
+
+            // Save the product list for later selection detection
+            const multiProductSelection = {
+              products: customerProducts.map((p, i) => ({
+                index: i + 1,
+                product_id: p.product_id,
+                product_name: p.product_name,
+                event_type: p.event_type,
+              })),
+              timestamp: Date.now(),
+            };
+            await setPendingMultiProductSelection(conversationId, multiProductSelection);
+            console.log(`[Step 5] Saved ${multiProductSelection.products.length} products for selection detection`);
 
             // Early return with clarification
             earlyReturnForProductSelection = {

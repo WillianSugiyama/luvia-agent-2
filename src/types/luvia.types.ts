@@ -70,6 +70,18 @@ export interface PendingProductConfirmation {
   timestamp: number;
 }
 
+export interface MultiProductSelectionItem {
+  index: number; // 1, 2, 3...
+  product_id: string;
+  product_name: string;
+  event_type: string;
+}
+
+export interface PendingMultiProductSelection {
+  products: MultiProductSelectionItem[];
+  timestamp: number;
+}
+
 export interface ConversationState {
   conversation_id: string;
   current_product_id: string | null;
@@ -83,4 +95,5 @@ export interface ConversationState {
   support_mode_since: number | null;              // Timestamp when support mode started
   pending_context_switch: PendingContextSwitch | null; // Pending confirmation for context switch
   pending_product_confirmation: PendingProductConfirmation | null; // Pending confirmation for product from history
+  pending_multi_product_selection: PendingMultiProductSelection | null; // Pending selection from multi-product list
 }

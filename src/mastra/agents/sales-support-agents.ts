@@ -18,6 +18,12 @@ type EnrichedContext = {
   };
 };
 
+type GreetingData = {
+  customer_name?: string;
+  agent_name?: string;
+  team_name?: string;
+};
+
 const getEnrichedContextFromRuntime = (requestContext: any): EnrichedContext | null => {
   if (!requestContext?.get) {
     return null;
@@ -31,10 +37,39 @@ const getEnrichedContextFromRuntime = (requestContext: any): EnrichedContext | n
   }
 };
 
+const getGreetingDataFromRuntime = (requestContext: any): GreetingData | null => {
+  if (!requestContext?.get) {
+    return null;
+  }
+
+  try {
+    const data = requestContext.get('greeting_data') as GreetingData | undefined;
+    return data ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const buildGreetingPrefix = (greetingData: GreetingData | null): string => {
+  if (!greetingData) {
+    return 'Olá! Tudo bem?';
+  }
+
+  const { customer_name } = greetingData;
+
+  if (customer_name) {
+    return `Olá ${customer_name}, tudo bem?`;
+  }
+
+  return 'Olá! Tudo bem?';
+};
+
 export const salesAgent = new Agent({
   name: 'sales_agent',
   instructions: ({ requestContext }) => {
     const ctx = getEnrichedContextFromRuntime(requestContext);
+    const greetingData = getGreetingDataFromRuntime(requestContext);
+    const greetingPrefix = buildGreetingPrefix(greetingData);
 
     const product = ctx?.product ?? {
       name: 'produto',
@@ -68,6 +103,11 @@ export const salesAgent = new Agent({
 
     return `
 Você é um especialista em vendas.
+
+SAUDAÇÃO OBRIGATÓRIA:
+Comece SEMPRE sua resposta com: "${greetingPrefix}"
+Depois da saudação, responda à pergunta ou objeção do cliente.
+
 PRODUTO: ${product.name}
 PREÇO: ${product.price}
 ${descriptionText}
@@ -100,6 +140,8 @@ export const supportAgent = new Agent({
   name: 'support_agent',
   instructions: ({ requestContext }) => {
     const ctx = getEnrichedContextFromRuntime(requestContext);
+    const greetingData = getGreetingDataFromRuntime(requestContext);
+    const greetingPrefix = buildGreetingPrefix(greetingData);
 
     const product = ctx?.product ?? {
       name: 'produto',
@@ -121,6 +163,11 @@ export const supportAgent = new Agent({
 
     return `
 Você é o suporte técnico oficial.
+
+SAUDAÇÃO OBRIGATÓRIA:
+Comece SEMPRE sua resposta com: "${greetingPrefix}"
+Depois da saudação, responda à dúvida ou problema do cliente.
+
 Cliente comprou: ${product.name}. Status: ${customerStatus}.
 
 Base de Conhecimento/Regras:
@@ -141,18 +188,23 @@ export const clarificationAgent = new Agent({
   name: 'clarification_agent',
   instructions: ({ requestContext }) => {
     const ctx = getEnrichedContextFromRuntime(requestContext);
+    const greetingData = getGreetingDataFromRuntime(requestContext);
+    const greetingPrefix = buildGreetingPrefix(greetingData);
     const suggestedProduct = ctx?.product?.name ?? 'o produto';
 
     return `
 O sistema encontrou um produto que pode ser o que o usuário está procurando, mas não tem certeza (score de confiança < 0.9).
+
+SAUDAÇÃO OBRIGATÓRIA:
+Comece SEMPRE sua resposta com: "${greetingPrefix}"
+Depois da saudação, peça a confirmação do produto.
 
 PRODUTO SUGERIDO: ${suggestedProduct}
 
 Sua tarefa:
 - SUGIRA o produto encontrado ao usuário
 - Peça confirmação de forma natural e direta
-- Exemplo: "Você está falando sobre o **${suggestedProduct}**?"
-- Ou: "Entendi que você quer saber sobre o **${suggestedProduct}**, é isso mesmo?"
+- Exemplo: "${greetingPrefix} Você está falando sobre o **${suggestedProduct}**?"
 
 Regras importantes:
 - SEMPRE mencione o nome do produto sugerido
