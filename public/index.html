@@ -277,6 +277,28 @@
       cursor: not-allowed;
     }
 
+    .new-chat-btn {
+      margin-left: auto;
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid #f85149;
+      background: transparent;
+      color: #f85149;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+
+    .new-chat-btn:hover {
+      background: #f8514920;
+    }
+
+    .new-chat-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     .debug-body {
       flex: 1;
       overflow-y: auto;
@@ -495,6 +517,7 @@
           💬 Chat Interface
           <span class="status-badge idle" id="chatStatus">IDLE</span>
         </div>
+        <button class="new-chat-btn" id="newChatBtn">🔄 Nova Conversa</button>
       </div>
 
       <div class="config-section">
@@ -590,6 +613,7 @@
     const phoneEl = document.getElementById('phone');
     const messageInputEl = document.getElementById('messageInput');
     const sendBtnEl = document.getElementById('sendBtn');
+    const newChatBtnEl = document.getElementById('newChatBtn');
     const userConfirmationEl = document.getElementById('userConfirmation');
     const chatStatusEl = document.getElementById('chatStatus');
     const debugStatusEl = document.getElementById('debugStatus');
@@ -869,7 +893,72 @@
       }
     }
 
+    async function startNewChat() {
+      const team_id = teamIdEl.value.trim();
+      const phone = phoneEl.value.trim();
+
+      if (!team_id) {
+        alert('Preencha o team_id para iniciar nova conversa.');
+        return;
+      }
+
+      newChatBtnEl.disabled = true;
+      newChatBtnEl.textContent = '⏳ Resetando...';
+
+      try {
+        const res = await fetch('/api/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team_id, phone }),
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+          // Clear chat messages (keep loading indicator)
+          const loadingIndicator = messagesEl.querySelector('.loading-indicator');
+          messagesEl.innerHTML = '';
+          if (loadingIndicator) {
+            messagesEl.appendChild(loadingIndicator);
+          }
+
+          // Reset workflow timeline
+          resetWorkflowTimeline();
+
+          // Reset debug info
+          latestDebugInfoEl.innerHTML = `
+            <div class="debug-card">
+              <div class="debug-card-content" style="color: #6e7681; text-align: center;">
+                Conversa resetada. Aguardando nova mensagem...
+              </div>
+            </div>
+          `;
+
+          // Clear request log
+          requestLogEl.innerHTML = '';
+          requestCount = 0;
+
+          // Reset confirmation checkbox
+          userConfirmationEl.checked = false;
+
+          updateStatus('success');
+          console.log('Conversa resetada:', data.message);
+        } else {
+          alert('Erro ao resetar conversa: ' + (data.error || 'Erro desconhecido'));
+          updateStatus('error');
+        }
+      } catch (err) {
+        console.error('Erro ao resetar conversa:', err);
+        alert('Erro de rede ao resetar conversa.');
+        updateStatus('error');
+      } finally {
+        newChatBtnEl.disabled = false;
+        newChatBtnEl.textContent = '🔄 Nova Conversa';
+      }
+    }
+
     sendBtnEl.addEventListener('click', sendMessage);
+    newChatBtnEl.addEventListener('click', startNewChat);
     messageInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();

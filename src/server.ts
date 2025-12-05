@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mastra } from './mastra/index';
+import { clearConversationState } from './mastra/tools/manage-conversation-context-tool';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +13,23 @@ const port = process.env.PORT || 3000;
 app.use(express.json());
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// Health check endpoint
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.get('/', (_req, res) => {
+  res.json({
+    service: 'Luvia Chat API',
+    version: '1.0.0',
+    endpoints: {
+      chat: 'POST /api/chat',
+      reset: 'POST /api/reset',
+      health: 'GET /health'
+    }
+  });
+});
 
 app.post('/api/chat', async (req, res) => {
   try {
@@ -58,6 +76,43 @@ app.post('/api/chat', async (req, res) => {
     return res.json(response);
   } catch (err: any) {
     console.error('Error in /api/chat:', err);
+    return res.status(500).json({
+      error: 'Internal server error',
+      details: err?.message ?? String(err),
+    });
+  }
+});
+
+// Reset conversation endpoint
+app.post('/api/reset', async (req, res) => {
+  try {
+    const { team_id, phone, email } = req.body ?? {};
+
+    if (!team_id) {
+      return res.status(400).json({
+        error: 'team_id is required',
+      });
+    }
+
+    // Conversation ID follows the same pattern as the workflow
+    const sanitizedPhone = phone ? phone.replace(/\D/g, '') : undefined;
+    const conversationId = sanitizedPhone || email || `team-${team_id}`;
+
+    const success = await clearConversationState(conversationId);
+
+    if (success) {
+      return res.json({
+        success: true,
+        message: `Conversation reset successfully for: ${conversationId}`,
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to reset conversation',
+      });
+    }
+  } catch (err: any) {
+    console.error('Error in /api/reset:', err);
     return res.status(500).json({
       error: 'Internal server error',
       details: err?.message ?? String(err),

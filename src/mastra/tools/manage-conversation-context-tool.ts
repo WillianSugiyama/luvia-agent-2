@@ -162,6 +162,28 @@ export const clearPendingProductConfirmation = async (conversationId: string) =>
   }
 };
 
+// Helper: Clear entire conversation state (reset)
+export const clearConversationState = async (conversationId: string): Promise<boolean> => {
+  try {
+    await memory.updateWorkingMemory({
+      threadId: conversationId,
+      resourceId: 'conversation-context',
+      workingMemory: '',
+      memoryConfig: {
+        workingMemory: {
+          enabled: true,
+          scope: 'resource',
+          template: '# Luvia Conversation State',
+        },
+      },
+    });
+    return true;
+  } catch (error) {
+    console.error('[clearConversationState] Error:', error);
+    return false;
+  }
+};
+
 export const manageConversationContext = createTool({
   id: 'manage_conversation_context',
   description:
