@@ -18,7 +18,11 @@ import { dirname, join } from 'node:path';
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = dirname(currentFile);
-const dbPath = join(currentDir, '..', '..', '.mastra', 'mastra.db');
+const dbPath = join(currentDir, '..', '..', 'data', 'mastra.db');
+
+// Use LIBSQL_URL env var for cloud database (Turso), fallback to local file
+const libsqlUrl = process.env.LIBSQL_URL || `file:${dbPath}`;
+console.log('[Mastra] Using LibSQL URL:', libsqlUrl.startsWith('file:') ? 'local file' : 'remote');
 
 export const mastra = new Mastra({
   workflows: { luviaWorkflow },
@@ -34,8 +38,8 @@ export const mastra = new Mastra({
   },
   storage: new LibSQLStore({
     id: 'main',
-    // stores observability, scores, traces into persistent file storage
-    url: `file:${dbPath}`,
+    url: libsqlUrl,
+    ...(process.env.LIBSQL_AUTH_TOKEN && { authToken: process.env.LIBSQL_AUTH_TOKEN }),
   }),
   logger: new PinoLogger({
     name: 'Mastra',

@@ -7,7 +7,8 @@ import type { ConversationState, ProductHistoryItem } from '../../types/luvia.ty
 const memory = new Memory({
   storage: new LibSQLStore({
     id: 'conversation-context',
-    url: 'file:../mastra.db',
+    url: process.env.LIBSQL_URL || 'file:./data/memory.db',
+    ...(process.env.LIBSQL_AUTH_TOKEN && { authToken: process.env.LIBSQL_AUTH_TOKEN }),
   }),
   options: {
     workingMemory: {
