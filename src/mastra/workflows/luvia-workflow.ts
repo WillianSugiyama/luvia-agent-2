@@ -393,7 +393,12 @@ const security_and_enrich_step = createStep({
         // they're likely asking about products they already have
         const shouldAskAboutExistingProducts = intent.interaction_type !== 'purchase';
 
-        if (shouldAskAboutExistingProducts && !previousState?.active_support_product_id) {
+        // Only ask for product clarification if:
+        // 1. No active support product is set
+        // 2. No current product is already being discussed (context from previous turns)
+        const hasActiveContext = previousState?.active_support_product_id || previousState?.current_product_id;
+
+        if (shouldAskAboutExistingProducts && !hasActiveContext) {
           // Case 1: Customer has exactly 1 product - ask for confirmation first
           if (customerProducts.length === 1) {
             const singleProduct = customerProducts[0];
