@@ -202,9 +202,14 @@ const security_and_enrich_step = createStep({
             team_name: greetingDataForSelection.team_name,
           });
 
+          // Create a contextual message for the agent (instead of just "2")
+          const contextualMessage = interactionType === 'support'
+            ? `Quero falar sobre o produto ${productName} que eu comprei.`
+            : `Quero saber mais sobre o produto ${productName}.`;
+
           return {
             original_message: message,
-            sanitized_message: safeMessage,
+            sanitized_message: contextualMessage,
             conversation_id: conversationId,
             team_id,
             customer_phone: sanitizedPhone,
