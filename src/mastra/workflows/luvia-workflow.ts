@@ -140,7 +140,97 @@ const security_and_enrich_step = createStep({
       logger.info(`[Step 1] Security passed - conversationId: ${conversationId}`);
     }
 
-    // 2. Check for greetings using LLM (early return if ONLY a greeting)
+    // 2. Load Previous State FIRST (to check for pending selections)
+    const previousState = await loadConversationState(conversationId);
+
+    // 2.1. Check for pending multi-product selection BEFORE greeting handler
+    if (previousState?.pending_multi_product_selection) {
+      const pendingProducts = previousState.pending_multi_product_selection.products;
+      console.log(`[Step 2.1] Pending multi-product selection detected - ${pendingProducts.length} products`);
+
+      // Use LLM to detect which product the user selected
+      const selectionResult = await product_selection_detector.execute(
+        {
+          message: safeMessage,
+          products: pendingProducts.map((p) => ({
+            index: p.index,
+            product_name: p.product_name,
+            event_type: p.event_type,
+          })),
+        },
+        { requestContext, mastra }
+      ) as { selected_index: number | null; confidence: number; is_selection: boolean; is_new_question: boolean; detected_intent?: string };
+
+      console.log(`[Step 2.1] Selection result: ${JSON.stringify(selectionResult)}`);
+
+      if (selectionResult.is_selection && selectionResult.selected_index !== null) {
+        // User selected a product - find it and proceed
+        const selectedProduct = pendingProducts.find((p) => p.index === selectionResult.selected_index);
+
+        if (selectedProduct) {
+          console.log(`[Step 2.1] ✅ User selected product #${selectionResult.selected_index}: "${selectedProduct.product_name}"`);
+
+          // Clear the pending selection
+          await clearPendingMultiProductSelection(conversationId);
+
+          // Load enriched context for the selected product
+          const enrichedContext = await get_enriched_context.execute(
+            {
+              product_id: selectedProduct.product_id,
+              team_id,
+              customer_phone: sanitizedPhone ?? '',
+              user_intent: safeMessage,
+            },
+            { requestContext, mastra }
+          ) as { product: { name: string; price: string; checkout_link: string; description?: string }; customer_status: string; rules: string[]; sales_strategy: { framework: string; instruction: string; cta_suggested: string; should_offer: boolean } };
+
+          const productName = enrichedContext.product.name || selectedProduct.product_name;
+          console.log(`[Step 2.1] Product loaded: "${productName}" - routing to agent`);
+
+          // Determine interaction type based on event_type
+          const interactionType = selectedProduct.event_type === 'approved' ? 'support' : 'sales';
+
+          // Store greeting data for agents (fetch it quickly)
+          const greetingDataForSelection = await greeting_handler.execute(
+            { message: safeMessage, team_id, customer_phone: sanitizedPhone },
+            { requestContext, mastra }
+          ) as { customer_name?: string; agent_name?: string; team_name?: string };
+
+          requestContext.set('greeting_data', {
+            customer_name: greetingDataForSelection.customer_name,
+            agent_name: greetingDataForSelection.agent_name,
+            team_name: greetingDataForSelection.team_name,
+          });
+
+          return {
+            original_message: message,
+            sanitized_message: safeMessage,
+            conversation_id: conversationId,
+            team_id,
+            customer_phone: sanitizedPhone,
+            customer_email: email,
+            product_id: selectedProduct.product_id,
+            product_name: productName,
+            enriched_context: enrichedContext,
+            is_ambiguous: false,
+            needs_confirmation: false,
+            intent: {
+              interaction_type: interactionType,
+              has_clear_product: true,
+              normalized_query: safeMessage,
+            },
+            needs_multi_product_clarification: false,
+          };
+        }
+      } else if (selectionResult.is_new_question) {
+        // User is asking something new - clear the pending selection and continue
+        console.log(`[Step 2.1] User asking new question - clearing pending selection`);
+        await clearPendingMultiProductSelection(conversationId);
+      }
+      // If not a clear selection and not a new question, continue to greeting handler
+    }
+
+    // 3. Check for greetings using LLM (early return if ONLY a greeting)
     const greetingResult = await greeting_handler.execute(
       { message: safeMessage, team_id, customer_phone: sanitizedPhone },
       { requestContext, mastra }
@@ -205,85 +295,7 @@ const security_and_enrich_step = createStep({
       };
     }
 
-    // 3. Load Previous State
-    const previousState = await loadConversationState(conversationId);
-
-    // 3.3. Check for pending multi-product selection (user selecting from list)
-    if (previousState?.pending_multi_product_selection) {
-      const pendingProducts = previousState.pending_multi_product_selection.products;
-      console.log(`[Step 3.3] Pending multi-product selection detected - ${pendingProducts.length} products`);
-
-      // Use LLM to detect which product the user selected
-      const selectionResult = await product_selection_detector.execute(
-        {
-          message: safeMessage,
-          products: pendingProducts.map((p) => ({
-            index: p.index,
-            product_name: p.product_name,
-            event_type: p.event_type,
-          })),
-        },
-        { requestContext, mastra }
-      ) as { selected_index: number | null; confidence: number; is_selection: boolean; is_new_question: boolean; detected_intent?: string };
-
-      console.log(`[Step 3.3] Selection result: ${JSON.stringify(selectionResult)}`);
-
-      if (selectionResult.is_selection && selectionResult.selected_index !== null) {
-        // User selected a product - find it and proceed
-        const selectedProduct = pendingProducts.find((p) => p.index === selectionResult.selected_index);
-
-        if (selectedProduct) {
-          console.log(`[Step 3.3] ✅ User selected product #${selectionResult.selected_index}: "${selectedProduct.product_name}"`);
-
-          // Clear the pending selection
-          await clearPendingMultiProductSelection(conversationId);
-
-          // Load enriched context for the selected product
-          const enrichedContext = await get_enriched_context.execute(
-            {
-              product_id: selectedProduct.product_id,
-              team_id,
-              customer_phone: sanitizedPhone ?? '',
-              user_intent: safeMessage,
-            },
-            { requestContext, mastra }
-          ) as { product: { name: string; price: string; checkout_link: string; description?: string }; customer_status: string; rules: string[]; sales_strategy: { framework: string; instruction: string; cta_suggested: string; should_offer: boolean } };
-
-          const productName = enrichedContext.product.name || selectedProduct.product_name;
-          console.log(`[Step 3.3] Product loaded: "${productName}" - routing to agent`);
-
-          // Determine interaction type based on event_type
-          const interactionType = selectedProduct.event_type === 'approved' ? 'support' : 'sales';
-
-          return {
-            original_message: message,
-            sanitized_message: safeMessage,
-            conversation_id: conversationId,
-            team_id,
-            customer_phone: sanitizedPhone,
-            customer_email: email,
-            product_id: selectedProduct.product_id,
-            product_name: productName,
-            enriched_context: enrichedContext,
-            is_ambiguous: false,
-            needs_confirmation: false,
-            intent: {
-              interaction_type: interactionType,
-              has_clear_product: true,
-              normalized_query: safeMessage,
-            },
-            needs_multi_product_clarification: false,
-          };
-        }
-      } else if (selectionResult.is_new_question) {
-        // User is asking something new - clear the pending selection and continue
-        console.log(`[Step 3.3] User asking new question - clearing pending selection`);
-        await clearPendingMultiProductSelection(conversationId);
-      }
-      // If not a clear selection and not a new question, keep the pending selection for next turn
-    }
-
-    // 3.5. Check for pending product confirmation (PRIORITY)
+    // 4. Check for pending product confirmation (PRIORITY)
     if (previousState?.pending_product_confirmation) {
       console.log(`[Step 3.5] Pending product confirmation detected - suggested product: "${previousState.pending_product_confirmation.suggested_product_name}"`);
 
