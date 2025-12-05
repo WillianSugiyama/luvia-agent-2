@@ -1,8 +1,15 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+console.log('[Server] Starting server...');
+console.log('[Server] NODE_ENV:', process.env.NODE_ENV);
+console.log('[Server] PORT:', process.env.PORT);
+
 import { mastra } from './mastra/index';
 import { clearConversationState } from './mastra/tools/manage-conversation-context-tool';
+
+console.log('[Server] Mastra loaded successfully');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -120,6 +127,7 @@ app.post('/api/reset', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Luvia chat server running at http://localhost:${port}`);
+const host = '0.0.0.0';
+app.listen(Number(port), host, () => {
+  console.log(`Luvia chat server running at http://${host}:${port}`);
 });
