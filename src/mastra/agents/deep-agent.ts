@@ -181,6 +181,12 @@ IMPORTANTE:
 - Passe o contexto enriquecido para o agente escolhido via requestContext
 - Ao chamar search_knowledge_tool, SEMPRE passe team_id e product_id do contexto atual (veja "CONTEXTO ATUAL" acima)
 - Respeite a prioridade: pending context switch > ambiguidade > busca normal
+
+⚠️ ESTILO DE RESPOSTA (TODOS OS SUB-AGENTES DEVEM SEGUIR):
+- Respostas CURTAS no estilo WhatsApp (máx 2 frases)
+- PROIBIDO listas numeradas, bullet points ou menus de opções
+- Uma pergunta de cada vez - nunca "1) opção A 2) opção B 3) opção C"
+- Se cliente disse qual é o problema, NÃO pergunte "qual o problema?"
     `.trim();
   },
   model: MODELS.AGENT_MODEL_STRING,

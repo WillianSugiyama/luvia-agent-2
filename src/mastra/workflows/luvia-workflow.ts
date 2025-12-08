@@ -19,6 +19,7 @@ import { relevanceScorer } from '../scorers/relevance-scorer';
 import { response_consolidator } from '../tools/response-consolidator-tool';
 import { media_message_handler } from '../tools/media-message-handler-tool';
 import { message_consolidator } from '../tools/message-consolidator-tool';
+import { humanize_clarification } from '../tools/humanize-clarification-tool';
 
 // Schema intermediário para passar dados entre steps
 const enrichedContextSchema = z.object({
@@ -353,28 +354,50 @@ const security_and_enrich_step = createStep({
           );
           console.log(`[Step 2.1] Saved current_product_id: ${selectedProduct.product_id}`);
 
+          // Determine which message to use:
+          // - If user's current message contains NEW information (is_new_question=true), use CURRENT message
+          // - If user just selected (e.g., "2" or "Tratamento"), use ORIGINAL message
+          // This ensures "Tratamento + esqueci minha senha" uses "esqueci minha senha" context
+          const messageToUse = selectionResult.is_new_question ? safeMessage : originalMessage;
+          console.log(`[Step 2.1] is_new_question=${selectionResult.is_new_question}, using message: "${messageToUse.substring(0, 50)}..."`);
+
           // Load enriched context for the selected product
-          // Use the ORIGINAL message for user_intent so the agent knows the original question
           const enrichedContext = await get_enriched_context.execute(
             {
               product_id: selectedProduct.product_id,
               team_id,
               customer_phone: sanitizedPhone ?? '',
-              user_intent: originalMessage, // Use original message, not "2"
+              user_intent: messageToUse,
             },
             { requestContext, mastra }
           ) as { product: { name: string; price: string; checkout_link: string; description?: string }; customer_status: string; rules: string[]; sales_strategy: { framework: string; instruction: string; cta_suggested: string; should_offer: boolean } };
 
           const productName = enrichedContext.product.name || selectedProduct.product_name;
           console.log(`[Step 2.1] Product loaded: "${productName}" - routing to agent`);
-          console.log(`[Step 2.1] Will answer original question: "${originalMessage}"`);
+          console.log(`[Step 2.1] Will answer question: "${messageToUse.substring(0, 80)}${messageToUse.length > 80 ? '...' : ''}"`);
 
-          // Determine interaction type based on event_type OR original intent
-          const interactionType = selectedProduct.event_type === 'approved' ? 'support' : originalIntent;
+          // Determine interaction type based on current message content or fallback to original intent
+          // Re-interpret intent if user provided new information
+          let interactionType = originalIntent;
+          if (selectionResult.is_new_question) {
+            // Check for common support keywords in the new message
+            const lowerMessage = safeMessage.toLowerCase();
+            if (/senha|password|login|acesso|acessar|entrar/.test(lowerMessage)) {
+              interactionType = 'support';
+            } else if (/pre[çc]o|valor|quanto|custo|parcel/.test(lowerMessage)) {
+              interactionType = 'pricing';
+            } else if (/comprar|adquirir|quero|interesse/.test(lowerMessage)) {
+              interactionType = 'purchase';
+            }
+          }
+          // Override to support if product is approved (customer already bought)
+          if (selectedProduct.event_type === 'approved') {
+            interactionType = 'support';
+          }
 
           // Store greeting data for agents (fetch it quickly)
           const greetingDataForSelection = await greeting_handler.execute(
-            { message: originalMessage, team_id, customer_phone: sanitizedPhone, conversation_history: conversationHistory },
+            { message: messageToUse, team_id, customer_phone: sanitizedPhone, conversation_history: conversationHistory },
             { requestContext, mastra }
           ) as { customer_name?: string; agent_name?: string; team_name?: string };
 
@@ -384,12 +407,9 @@ const security_and_enrich_step = createStep({
             team_name: greetingDataForSelection.team_name,
           });
 
-          // Use the ORIGINAL message so the agent can answer the original question
-          // This is key: instead of "2", we pass "não tenho o link do curso" so the agent
-          // knows what to answer now that the product is confirmed
           return {
-            original_message: originalMessage,
-            sanitized_message: originalMessage, // Use original question, not "2"
+            original_message: message,
+            sanitized_message: messageToUse,
             conversation_id: conversationId,
             team_id,
             customer_phone: sanitizedPhone,
@@ -402,7 +422,7 @@ const security_and_enrich_step = createStep({
             intent: {
               interaction_type: interactionType,
               has_clear_product: true,
-              normalized_query: originalMessage,
+              normalized_query: messageToUse,
             },
             needs_multi_product_clarification: false,
             frustration_context: frustrationResult,
@@ -607,34 +627,27 @@ const security_and_enrich_step = createStep({
               timestamp: Date.now(),
             });
 
-            // Build confirmation question based on event type
-            const eventTypeText = singleProduct.event_type === 'approved'
-              ? 'que você já comprou'
-              : singleProduct.event_type === 'abandoned'
-                ? 'no seu carrinho'
-                : singleProduct.event_type === 'refund'
-                  ? 'que você solicitou reembolso'
-                  : 'no seu histórico';
+            // Determine context based on intent
+            let singleProductContext: 'greeting' | 'support' | 'sales' | 'password' | 'access' | 'general' = 'general';
+            if (intent.interaction_type === 'greeting') singleProductContext = 'greeting';
+            else if (intent.interaction_type === 'support') singleProductContext = 'support';
+            else if (intent.interaction_type === 'pricing' || intent.interaction_type === 'purchase') singleProductContext = 'sales';
+            else if (/senha|password/i.test(safeMessage)) singleProductContext = 'password';
+            else if (/acesso|acessar|login|entrar/i.test(safeMessage)) singleProductContext = 'access';
 
-            // Use product name or fallback
-            const productDisplayName = singleProduct.product_name && singleProduct.product_name.trim() !== ''
-              ? singleProduct.product_name
-              : 'um produto';
+            // Use LLM to generate humanized confirmation message
+            const singleProductResult = await humanize_clarification.execute({
+              user_message: safeMessage,
+              customer_name: greetingResult.customer_name,
+              products: [{
+                name: singleProduct.product_name,
+                status: singleProduct.event_type as 'approved' | 'abandoned' | 'refund',
+              }],
+              context: singleProductContext,
+            }, { requestContext, mastra });
 
-            // Build greeting response based on user's message
-            const isGreetingSingle = /^(oi|olá|ola|bom dia|boa tarde|boa noite|e aí|eae|hey|hello|hi)\b/i.test(safeMessage.trim());
-            const askedHowAreYouSingle = /(tudo bem|como vai|como está|td bem|blz|beleza)\??/i.test(safeMessage);
-
-            let greetingPartSingle = 'Olá!';
-            if (isGreetingSingle && askedHowAreYouSingle) {
-              greetingPartSingle = 'Olá! Tudo ótimo por aqui, obrigada por perguntar! 😊';
-            } else if (askedHowAreYouSingle) {
-              greetingPartSingle = 'Tudo ótimo, obrigada por perguntar! 😊';
-            }
-
-            const confirmationMessage = `${greetingPartSingle} Vi que você tem ${productDisplayName === 'um produto' ? productDisplayName : `o produto **${productDisplayName}**`} ${eventTypeText}. Seria sobre esse produto que você quer falar?`;
-
-            console.log(`[Step 5] Confirmation message: ${confirmationMessage}`);
+            const confirmationMessage = singleProductResult.message;
+            console.log(`[Step 5] Humanized confirmation: "${confirmationMessage}"`);
 
             // Early return with confirmation message
             earlyReturnForProductSelection = {
@@ -675,41 +688,27 @@ const security_and_enrich_step = createStep({
           else {
             console.log(`[Step 5] Customer has ${customerProducts.length} products - needs clarification`);
 
-            // Build clarification message listing customer's products
-            const productsList = customerProducts
-              .map((p, i) => {
-                // Debug: log event_type to identify unexpected values
-                console.log(`[Step 5] Product "${p.product_name}" has event_type: "${p.event_type}" (type: ${typeof p.event_type})`);
+            // Determine context based on intent
+            let clarificationContext: 'greeting' | 'support' | 'sales' | 'password' | 'access' | 'general' = 'general';
+            if (intent.interaction_type === 'greeting') clarificationContext = 'greeting';
+            else if (intent.interaction_type === 'support') clarificationContext = 'support';
+            else if (intent.interaction_type === 'pricing' || intent.interaction_type === 'purchase') clarificationContext = 'sales';
+            else if (/senha|password/i.test(safeMessage)) clarificationContext = 'password';
+            else if (/acesso|acessar|login|entrar/i.test(safeMessage)) clarificationContext = 'access';
 
-                // Map event type to user-friendly label
-                let statusLabel = 'Desconhecido';
-                if (p.event_type === 'approved') {
-                  statusLabel = 'Aprovado';
-                } else if (p.event_type === 'abandoned') {
-                  statusLabel = 'Carrinho Abandonado';
-                } else if (p.event_type === 'refund') {
-                  statusLabel = 'Reembolsado';
-                } else {
-                  console.warn(`[Step 5] ⚠️ Unexpected event_type: "${p.event_type}" for product "${p.product_name}"`);
-                  statusLabel = `Desconhecido (${p.event_type})`;
-                }
+            // Use LLM to generate humanized clarification message
+            const humanizedResult = await humanize_clarification.execute({
+              user_message: safeMessage,
+              customer_name: greetingResult.customer_name,
+              products: customerProducts.map(p => ({
+                name: p.product_name,
+                status: p.event_type as 'approved' | 'abandoned' | 'refund',
+              })),
+              context: clarificationContext,
+            }, { requestContext, mastra });
 
-                return `${i + 1}. **${p.product_name}** (${statusLabel})`;
-              })
-              .join('\n');
-
-            // Build greeting response based on user's message
-            const isGreeting = /^(oi|olá|ola|bom dia|boa tarde|boa noite|e aí|eae|hey|hello|hi)\b/i.test(safeMessage.trim());
-            const askedHowAreYou = /(tudo bem|como vai|como está|td bem|blz|beleza)\??/i.test(safeMessage);
-
-            let greetingPart = 'Olá!';
-            if (isGreeting && askedHowAreYou) {
-              greetingPart = 'Olá! Tudo ótimo por aqui, obrigada por perguntar! 😊';
-            } else if (askedHowAreYou) {
-              greetingPart = 'Tudo ótimo, obrigada por perguntar! 😊';
-            }
-
-            const clarificationMessage = `${greetingPart} Vi que você tem os seguintes produtos:\n\n${productsList}\n\nSobre qual produto você gostaria de falar?`;
+            const clarificationMessage = humanizedResult.message;
+            console.log(`[Step 5] Humanized clarification: "${clarificationMessage}"`);
 
             // Save the product list AND original message for later selection detection
             // This allows us to answer the original question once product is selected
@@ -1072,17 +1071,31 @@ IMPORTANTE:
 
             const networkResult = await deepAgent.network(contextualPrompt, { requestContext });
             let response = '';
+            let finalResult = '';
             let agentUsed = 'deepAgent';
             let chunkCount = 0;
 
             for await (const chunk of networkResult) {
               chunkCount++;
-              console.log(`[Step 2] Chunk #${chunkCount}: type="${chunk.type}"`);
 
-              if (chunk.type === 'network-execution-event-step-finish') {
-                response = chunk.payload?.result ?? '';
-                console.log(`[Step 2] Got result from step-finish: ${response.length} chars`);
+              // Accumulate from agent-execution-event-text-delta as fallback
+              if (chunk.type === 'agent-execution-event-text-delta') {
+                const payload = chunk.payload as any;
+                const delta = payload?.textDelta || payload?.payload?.textDelta || '';
+                if (delta) {
+                  response += delta;
+                }
               }
+
+              // Final result from network-execution-event-step-finish (preferred)
+              if (chunk.type === 'network-execution-event-step-finish') {
+                const result = chunk.payload?.result ?? '';
+                if (result) {
+                  finalResult = result;
+                  console.log(`[Step 2] Got finalResult from step-finish: ${result.length} chars`);
+                }
+              }
+
               if (chunk.type === 'routing-agent-end') {
                 const payload = chunk.payload as any;
                 if (payload?.agentName) {
@@ -1090,16 +1103,15 @@ IMPORTANTE:
                   console.log(`[Step 2] Routed to agent: ${agentUsed}`);
                 }
               }
-
-              // Log all chunk types for debugging
-              if (chunk.type !== 'network-execution-event-step-finish' && chunk.type !== 'routing-agent-end') {
-                console.log(`[Step 2] Other chunk type: ${chunk.type}, has payload: ${!!chunk.payload}`);
-              }
             }
 
-            console.log(`[Step 2] Total chunks received: ${chunkCount}`);
-            console.log(`[Step 2] Deep agent response length: ${response.length} chars`);
-            console.log(`[Step 2] Deep agent response (first 200 chars): ${response.substring(0, 200)}...`);
+            // Use finalResult if available, otherwise accumulated deltas
+            if (finalResult) {
+              response = finalResult;
+            }
+
+            console.log(`[Step 2] Confirmation flow - chunks: ${chunkCount}, response: ${response.length} chars`);
+            console.log(`[Step 2] Response preview: "${response.substring(0, 200)}${response.length > 200 ? '...' : ''}"`);
 
             return {
               agent_response: response,
@@ -1274,35 +1286,28 @@ Analise e responda apropriadamente.
 
       // Processar eventos do network
       let response = '';
+      let finalResult = ''; // Store the final result from network-execution-event-step-finish
       let agentUsed = 'deepAgent';
       let chunkCount = 0;
+      let textDeltaCount = 0;
 
       for await (const chunk of networkResult) {
         chunkCount++;
-
-        // Log chunk type for debugging
-        console.log(`[Step 2] Chunk ${chunkCount}: type="${chunk.type}"`);
 
         if (logger) {
           logger.debug(`[Step 2] Network event - type: ${chunk.type}`);
         }
 
-        // Reset response when a new routing-agent response starts
-        // This prevents duplicating text from both agent-execution and routing-agent
-        if (chunk.type === 'routing-agent-text-start') {
-          response = ''; // Clear previous response, use only routing-agent output
+        // Reset response when a new agent execution starts (to avoid accumulating from multiple sub-agents)
+        if (chunk.type === 'agent-execution-start') {
+          console.log(`[Step 2] Chunk ${chunkCount}: RESET - agent-execution-start (prev response was ${response.length} chars)`);
+          response = '';
+          textDeltaCount = 0;
         }
 
-        // Handle text delta chunks - prefer routing-agent (final response) over agent-execution
-        if (chunk.type === 'routing-agent-text-delta') {
-          const payload = chunk.payload as any;
-          const delta = payload?.textDelta || payload?.delta || payload?.text || payload?.content;
-          if (delta) {
-            response += delta;
-          }
-        }
-        // Only use agent-execution if we haven't started receiving routing-agent text
-        else if (chunk.type === 'agent-execution-event-text-delta' && response === '') {
+        // ONLY accumulate from agent-execution-event-text-delta (sub-agent's direct response)
+        // Ignore routing-agent-text-delta to avoid duplication
+        if (chunk.type === 'agent-execution-event-text-delta') {
           const payload = chunk.payload as any;
           let delta: string | undefined;
 
@@ -1317,18 +1322,21 @@ Analise e responda apropriadamente.
 
           if (delta) {
             response += delta;
+            textDeltaCount++;
+            // Log every 20 deltas to track progress
+            if (textDeltaCount % 20 === 0) {
+              console.log(`[Step 2] Delta progress: ${textDeltaCount} deltas, ${response.length} chars total`);
+            }
           }
         }
 
-        if (chunk.type === 'agent-execution-event-step-finish') {
-          // Correct chunk type name!
-          // The payload is double-nested: chunk.payload.payload contains the actual data
-          const outerPayload = chunk.payload as any;
-          const innerPayload = outerPayload?.payload;
-          const result = innerPayload?.result || innerPayload?.text || innerPayload?.content || '';
-          console.log(`[Step 2] Got result from step-finish - length: ${result.length} chars`);
+        // Capture final result from network-execution-event-step-finish (most reliable source)
+        if (chunk.type === 'network-execution-event-step-finish') {
+          const payload = chunk.payload as any;
+          const result = payload?.result ?? '';
           if (result) {
-            response = result;
+            console.log(`[Step 2] Chunk ${chunkCount}: FINAL RESULT from network-step-finish - ${result.length} chars`);
+            finalResult = result;
           }
         }
 
@@ -1337,43 +1345,21 @@ Analise e responda apropriadamente.
           const payload = chunk.payload as any;
           if (payload?.agentName) {
             agentUsed = payload.agentName;
-            console.log(`[Step 2] Routed to agent: ${agentUsed}`);
+            console.log(`[Step 2] Chunk ${chunkCount}: Routed to agent: ${agentUsed}`);
           }
-        }
-
-        // Only log truly unknown chunk types (for debugging new Mastra versions)
-        const knownChunkTypes = [
-          // Agent execution events
-          'agent-execution-start',
-          'agent-execution-end',
-          'agent-execution-event-start',
-          'agent-execution-event-finish',
-          'agent-execution-event-step-start',
-          'agent-execution-event-step-finish',
-          'agent-execution-event-text-start',
-          'agent-execution-event-text-delta',
-          'agent-execution-event-text-end',
-          'agent-execution-event-reasoning-start',
-          'agent-execution-event-reasoning-end',
-          // Routing agent events
-          'routing-agent-start',
-          'routing-agent-end',
-          'routing-agent-text-start',
-          'routing-agent-text-delta',
-          // Tool execution events
-          'tool-execution-start',
-          'tool-execution-end',
-          // Network events
-          'network-execution-event-step-finish',
-          'network-execution-event-finish',
-        ];
-        if (!knownChunkTypes.includes(chunk.type)) {
-          console.log(`[Step 2] Unknown chunk type: ${chunk.type}, has_payload: ${!!chunk.payload}`);
         }
       }
 
+      // Use finalResult if available (most reliable), otherwise use accumulated deltas
+      if (finalResult) {
+        console.log(`[Step 2] Using finalResult from network-step-finish: ${finalResult.length} chars`);
+        response = finalResult;
+      } else {
+        console.log(`[Step 2] Using accumulated deltas: ${response.length} chars from ${textDeltaCount} deltas`);
+      }
+
       console.log(`[Step 2] Deep Agent completed - chunks: ${chunkCount}, agent_used: ${agentUsed}, response_length: ${response.length}`);
-      console.log(`[Step 2] Response preview: ${response.substring(0, 200)}...`);
+      console.log(`[Step 2] Response preview: "${response.substring(0, 200)}${response.length > 200 ? '...' : ''}"`);
 
       if (logger) {
         logger.info(`[Step 2] Deep Agent completed - agent_used: ${agentUsed}, response_length: ${response.length}`);

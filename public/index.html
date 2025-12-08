@@ -686,6 +686,7 @@
     const requestLogEl = document.getElementById('requestLog');
 
     let requestCount = 0;
+    let processedWorkflowIds = new Set(); // Track workflow IDs to avoid duplicate messages
 
     function updateStatus(status, text = '') {
       chatStatusEl.className = 'status-badge ' + status;
@@ -938,6 +939,25 @@
           updateWorkflowStep(2, 'error', `Erro: ${data.error || 'Erro desconhecido'}`);
           appendMessage('Erro ao processar a mensagem.', 'agent', { error: data.error || '' });
         } else {
+          // Check for duplicate workflow_run_id (happens when multiple messages are consolidated)
+          const workflowId = data.workflow_run_id;
+          if (workflowId && processedWorkflowIds.has(workflowId)) {
+            console.log(`[Dedup] Skipping duplicate response for workflow_run_id: ${workflowId}`);
+            // Still update status but don't add duplicate message
+            updateStatus('success');
+            return;
+          }
+
+          // Mark this workflow as processed
+          if (workflowId) {
+            processedWorkflowIds.add(workflowId);
+            // Keep only last 50 workflow IDs to prevent memory leak
+            if (processedWorkflowIds.size > 50) {
+              const first = processedWorkflowIds.values().next().value;
+              processedWorkflowIds.delete(first);
+            }
+          }
+
           updateStatus('success');
           updateWorkflowStep(2, 'completed', `Agente: ${data.agent_used}`);
           updateWorkflowStep(3, 'completed', 'Validações de segurança OK');
@@ -1010,6 +1030,9 @@
           // Clear request log
           requestLogEl.innerHTML = '';
           requestCount = 0;
+
+          // Clear processed workflow IDs
+          processedWorkflowIds.clear();
 
           // Reset confirmation checkbox
           userConfirmationEl.checked = false;
