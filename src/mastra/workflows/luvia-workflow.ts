@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { inputSchema as luviaInputSchema } from '../../schemas/input.schema';
 import { validate_security_layer } from '../tools/security-tool';
 import { advanced_product_search } from '../tools/advanced-product-search-tool';
-import { manageConversationContext, loadConversationState, updatePurchasedProducts, setActiveSupportProduct, setPendingContextSwitch, setPendingProductConfirmation, clearPendingProductConfirmation, setPendingMultiProductSelection, clearPendingMultiProductSelection } from '../tools/manage-conversation-context-tool';
+import { manageConversationContext, loadConversationState, updatePurchasedProducts, setActiveSupportProduct, setPendingContextSwitch, setPendingProductConfirmation, clearPendingProductConfirmation, setPendingMultiProductSelection, clearPendingMultiProductSelection, appendMessageToHistory, getConversationHistoryString } from '../tools/manage-conversation-context-tool';
 import { product_selection_detector } from '../tools/product-selection-detector-tool';
 import { get_enriched_context } from '../tools/get-enriched-context-tool';
 import { interpret_user_message } from '../tools/interpret-message-tool';
@@ -12,9 +12,13 @@ import { validate_promises_tool } from '../tools/validate-promises-tool';
 import { escalate_to_human_tool } from '../tools/escalate-to-human-tool';
 import { greeting_handler } from '../tools/greeting-handler-tool';
 import { fetch_customer_purchases } from '../tools/fetch-customer-purchases-tool';
+import { frustration_detector } from '../tools/frustration-detector-tool';
 import { multi_product_clarification } from '../tools/multi-product-clarification-tool';
 import { fetch_customer_products } from '../tools/fetch-customer-products-tool';
 import { relevanceScorer } from '../scorers/relevance-scorer';
+import { response_consolidator } from '../tools/response-consolidator-tool';
+import { media_message_handler } from '../tools/media-message-handler-tool';
+import { message_consolidator } from '../tools/message-consolidator-tool';
 
 // Schema intermediário para passar dados entre steps
 const enrichedContextSchema = z.object({
@@ -52,6 +56,14 @@ const enrichedContextSchema = z.object({
   // Multi-product clarification flag
   needs_multi_product_clarification: z.boolean().optional(),
   multi_product_clarification_message: z.string().optional(),
+  // Frustration context for agents
+  frustration_context: z.object({
+    is_frustrated: z.boolean(),
+    frustration_level: z.enum(['none', 'mild', 'moderate', 'high']),
+    frustration_indicators: z.array(z.string()),
+    recommended_action: z.string(),
+    should_escalate: z.boolean(),
+  }).optional(),
 });
 
 const deepAgentOutputSchema = z.object({
@@ -88,7 +100,7 @@ const security_and_enrich_step = createStep({
       throw new Error('Input data and Mastra instance are required');
     }
 
-    const { team_id, message, phone, email, user_confirmation: explicitConfirmation } = inputData;
+    const { team_id, message, phone, email, user_confirmation: explicitConfirmation, message_type } = inputData;
 
     // Auto-detect confirmation from message (sim, s, yes, etc.)
     const isConfirmationMessage = (msg: string): boolean => {
@@ -140,6 +152,147 @@ const security_and_enrich_step = createStep({
       logger.info(`[Step 1] Security passed - conversationId: ${conversationId}`);
     }
 
+    // 1.0.5. Handle media messages (images, audio, links, etc.)
+    const mediaResult = await media_message_handler.execute(
+      { message: safeMessage, message_type: message_type as any },
+      { requestContext, mastra }
+    ) as {
+      is_media_message: boolean;
+      media_type: 'image' | 'link' | 'audio' | 'video' | 'document' | 'sticker' | 'none';
+      contains_link: boolean;
+      extracted_links: string[];
+      needs_clarification: boolean;
+      clarification_message?: string;
+      can_process: boolean;
+      processing_note?: string;
+    };
+
+    // If media message needs clarification, return early with clarification request
+    if (mediaResult.needs_clarification && mediaResult.clarification_message && !mediaResult.can_process) {
+      console.log(`[Step 1.0.5] Media message needs clarification - type: ${mediaResult.media_type}`);
+      if (logger) {
+        logger.info(`[Step 1.0.5] Media message detected - type: ${mediaResult.media_type}, needs_clarification: true`);
+      }
+
+      return {
+        original_message: message,
+        sanitized_message: safeMessage,
+        conversation_id: conversationId,
+        team_id,
+        customer_phone: sanitizedPhone,
+        customer_email: email,
+        product_id: 'media-clarification',
+        product_name: 'Mídia',
+        enriched_context: {
+          product: {
+            name: 'Mídia',
+            price: '',
+            checkout_link: '',
+            description: mediaResult.clarification_message,
+          },
+          customer_status: 'unknown',
+          rules: [],
+          sales_strategy: {
+            framework: 'media-handling',
+            instruction: mediaResult.clarification_message,
+            cta_suggested: '',
+            should_offer: false,
+          },
+        },
+        is_ambiguous: false,
+        needs_confirmation: false,
+        intent: {
+          interaction_type: 'media_clarification',
+          has_clear_product: false,
+          normalized_query: safeMessage,
+        },
+        frustration_context: {
+          is_frustrated: false,
+          frustration_level: 'none' as const,
+          frustration_indicators: [],
+          recommended_action: '',
+          should_escalate: false,
+        },
+      };
+    }
+
+    // Store media context for agents if there's link/media
+    if (mediaResult.is_media_message) {
+      requestContext.set('media_context', {
+        media_type: mediaResult.media_type,
+        contains_link: mediaResult.contains_link,
+        extracted_links: mediaResult.extracted_links,
+        processing_note: mediaResult.processing_note,
+      });
+      console.log(`[Step 1.0.5] Media context stored - type: ${mediaResult.media_type}, links: ${mediaResult.extracted_links.length}`);
+    }
+
+    // 1.1. Save user message to conversation history IMMEDIATELY
+    // This ensures we capture all messages even if user sends multiple while waiting
+    await appendMessageToHistory(conversationId, 'user', safeMessage);
+    console.log(`[Step 1.1] Saved user message to history: "${safeMessage.substring(0, 50)}${safeMessage.length > 50 ? '...' : ''}"`);
+
+    // 1.2. Get conversation history for context-aware processing
+    const conversationHistory = await getConversationHistoryString(conversationId, 5);
+    if (conversationHistory) {
+      console.log(`[Step 1.2] Conversation history loaded (${conversationHistory.split('\n').length} messages)`);
+    }
+
+    // 1.2.5. Check for multiple unresponded user messages
+    const consolidationResult = await message_consolidator.execute(
+      { current_message: safeMessage, conversation_history: conversationHistory || '' },
+      { requestContext, mastra }
+    ) as {
+      has_pending_messages: boolean;
+      pending_message_count: number;
+      consolidated_context?: string;
+      should_acknowledge_wait: boolean;
+      estimated_urgency: 'low' | 'medium' | 'high';
+    };
+
+    // Store message consolidation context for agents
+    if (consolidationResult.has_pending_messages) {
+      requestContext.set('message_consolidation', {
+        has_pending: true,
+        pending_count: consolidationResult.pending_message_count,
+        consolidated_context: consolidationResult.consolidated_context,
+        should_acknowledge: consolidationResult.should_acknowledge_wait,
+        urgency: consolidationResult.estimated_urgency,
+      });
+      console.log(`[Step 1.2.5] Multiple user messages detected - pending: ${consolidationResult.pending_message_count}, urgency: ${consolidationResult.estimated_urgency}`);
+      if (logger) {
+        logger.info(`[Step 1.2.5] Message consolidation - pending: ${consolidationResult.pending_message_count}, urgency: ${consolidationResult.estimated_urgency}`);
+      }
+    }
+
+    // 1.3. Detect user frustration for context-aware responses
+    const frustrationResult = await frustration_detector.execute(
+      { message: safeMessage, conversation_history: conversationHistory || undefined },
+      { requestContext, mastra }
+    ) as {
+      is_frustrated: boolean;
+      frustration_level: 'none' | 'mild' | 'moderate' | 'high';
+      frustration_indicators: string[];
+      recommended_action: string;
+      should_escalate: boolean;
+    };
+
+    // Store frustration context for agents to use
+    requestContext.set('frustration_context', {
+      is_frustrated: frustrationResult.is_frustrated,
+      frustration_level: frustrationResult.frustration_level,
+      frustration_indicators: frustrationResult.frustration_indicators,
+      recommended_action: frustrationResult.recommended_action,
+      should_escalate: frustrationResult.should_escalate,
+    });
+
+    if (frustrationResult.is_frustrated) {
+      console.log(`[Step 1.3] ⚠️ Frustration detected - level: ${frustrationResult.frustration_level}, indicators: ${frustrationResult.frustration_indicators.join(', ')}`);
+      if (logger) {
+        logger.warn(`[Step 1.3] User frustration detected - level: ${frustrationResult.frustration_level}`);
+      }
+    }
+
     // 2. Load Previous State FIRST (to check for pending selections)
     const previousState = await loadConversationState(conversationId);
 
@@ -159,6 +312,7 @@ const security_and_enrich_step = createStep({
       });
 
       // Use LLM to detect which product the user selected
+      // Pass conversation history for better context understanding
       const selectionResult = await product_selection_detector.execute(
         {
           message: safeMessage,
@@ -167,6 +321,7 @@ const security_and_enrich_step = createStep({
             product_name: p.product_name,
             event_type: p.event_type,
           })),
+          conversation_history: conversationHistory,
         },
         { requestContext, mastra }
       ) as { selected_index: number | null; confidence: number; is_selection: boolean; is_new_question: boolean; detected_intent?: string };
@@ -219,7 +374,7 @@ const security_and_enrich_step = createStep({
 
           // Store greeting data for agents (fetch it quickly)
           const greetingDataForSelection = await greeting_handler.execute(
-            { message: originalMessage, team_id, customer_phone: sanitizedPhone },
+            { message: originalMessage, team_id, customer_phone: sanitizedPhone, conversation_history: conversationHistory },
             { requestContext, mastra }
           ) as { customer_name?: string; agent_name?: string; team_name?: string };
 
@@ -250,6 +405,7 @@ const security_and_enrich_step = createStep({
               normalized_query: originalMessage,
             },
             needs_multi_product_clarification: false,
+            frustration_context: frustrationResult,
           };
         }
       } else if (selectionResult.is_new_question) {
@@ -261,8 +417,9 @@ const security_and_enrich_step = createStep({
     }
 
     // 3. Check for greetings using LLM (early return if ONLY a greeting)
+    // Pass conversation history so the LLM knows if "olá?" is a new greeting or a follow-up
     const greetingResult = await greeting_handler.execute(
-      { message: safeMessage, team_id, customer_phone: sanitizedPhone },
+      { message: safeMessage, team_id, customer_phone: sanitizedPhone, conversation_history: conversationHistory },
       { requestContext, mastra }
     ) as {
       is_greeting_only: boolean;
@@ -322,6 +479,7 @@ const security_and_enrich_step = createStep({
           has_clear_product: false,
           normalized_query: safeMessage,
         },
+        frustration_context: frustrationResult,
       };
     }
 
@@ -370,6 +528,7 @@ const security_and_enrich_step = createStep({
           normalized_query: safeMessage,
         },
         needs_multi_product_clarification: false,
+        frustration_context: frustrationResult,
       };
     }
 
@@ -413,10 +572,13 @@ const security_and_enrich_step = createStep({
       if (customerProductsResult.has_products && customerProducts.length > 0) {
         console.log(`[Step 5] Customer has ${customerProducts.length} product(s)`);
 
-        // Ask for product selection UNLESS it's clearly about purchasing a new product
+        // Ask for product selection UNLESS:
+        // 1. It's clearly about purchasing a new product
+        // 2. It's just a greeting (let the natural conversation flow first)
         // When customer has products in history and asks about price, support, upgrade, refund, etc.
         // they're likely asking about products they already have
-        const shouldAskAboutExistingProducts = intent.interaction_type !== 'purchase';
+        const isGreetingIntent = intent.interaction_type === 'greeting' || greetingResult.is_greeting_only;
+        const shouldAskAboutExistingProducts = intent.interaction_type !== 'purchase' && !isGreetingIntent;
 
         // Only ask for product clarification if:
         // 1. No active support product is set
@@ -459,7 +621,18 @@ const security_and_enrich_step = createStep({
               ? singleProduct.product_name
               : 'um produto';
 
-            const confirmationMessage = `Olá! Vi que você tem ${productDisplayName === 'um produto' ? productDisplayName : `o produto **${productDisplayName}**`} ${eventTypeText}. Seria sobre esse produto que você quer falar? 😊`;
+            // Build greeting response based on user's message
+            const isGreetingSingle = /^(oi|olá|ola|bom dia|boa tarde|boa noite|e aí|eae|hey|hello|hi)\b/i.test(safeMessage.trim());
+            const askedHowAreYouSingle = /(tudo bem|como vai|como está|td bem|blz|beleza)\??/i.test(safeMessage);
+
+            let greetingPartSingle = 'Olá!';
+            if (isGreetingSingle && askedHowAreYouSingle) {
+              greetingPartSingle = 'Olá! Tudo ótimo por aqui, obrigada por perguntar! 😊';
+            } else if (askedHowAreYouSingle) {
+              greetingPartSingle = 'Tudo ótimo, obrigada por perguntar! 😊';
+            }
+
+            const confirmationMessage = `${greetingPartSingle} Vi que você tem ${productDisplayName === 'um produto' ? productDisplayName : `o produto **${productDisplayName}**`} ${eventTypeText}. Seria sobre esse produto que você quer falar?`;
 
             console.log(`[Step 5] Confirmation message: ${confirmationMessage}`);
 
@@ -493,6 +666,7 @@ const security_and_enrich_step = createStep({
               },
               needs_multi_product_clarification: false,
               multi_product_clarification_message: confirmationMessage,
+              frustration_context: frustrationResult,
             };
 
             shouldSkipEmbeddingSearch = true;
@@ -524,7 +698,18 @@ const security_and_enrich_step = createStep({
               })
               .join('\n');
 
-            const clarificationMessage = `Olá! Vi que você tem os seguintes produtos:\n\n${productsList}\n\nSobre qual produto você gostaria de falar? 😊`;
+            // Build greeting response based on user's message
+            const isGreeting = /^(oi|olá|ola|bom dia|boa tarde|boa noite|e aí|eae|hey|hello|hi)\b/i.test(safeMessage.trim());
+            const askedHowAreYou = /(tudo bem|como vai|como está|td bem|blz|beleza)\??/i.test(safeMessage);
+
+            let greetingPart = 'Olá!';
+            if (isGreeting && askedHowAreYou) {
+              greetingPart = 'Olá! Tudo ótimo por aqui, obrigada por perguntar! 😊';
+            } else if (askedHowAreYou) {
+              greetingPart = 'Tudo ótimo, obrigada por perguntar! 😊';
+            }
+
+            const clarificationMessage = `${greetingPart} Vi que você tem os seguintes produtos:\n\n${productsList}\n\nSobre qual produto você gostaria de falar?`;
 
             // Save the product list AND original message for later selection detection
             // This allows us to answer the original question once product is selected
@@ -573,6 +758,7 @@ const security_and_enrich_step = createStep({
               },
               needs_multi_product_clarification: true,
               multi_product_clarification_message: clarificationMessage,
+              frustration_context: frustrationResult,
             };
 
             shouldSkipEmbeddingSearch = true;
@@ -709,6 +895,7 @@ const security_and_enrich_step = createStep({
       },
       needs_multi_product_clarification: false,
       multi_product_clarification_message: undefined,
+      frustration_context: frustrationResult,
     };
   },
 });
@@ -749,6 +936,22 @@ const deep_agent_routing_step = createStep({
       return {
         agent_response: greetingResponse,
         agent_used: 'greetingHandler',
+        needs_human_escalation: false,
+        context: inputData,
+      };
+    }
+
+    // Se for clarificação de mídia, retorna diretamente a mensagem de clarificação
+    if (inputData.intent.interaction_type === 'media_clarification') {
+      const mediaResponse = inputData.enriched_context.sales_strategy.instruction;
+
+      if (logger) {
+        logger.info('[Step 2] Returning media clarification response directly');
+      }
+
+      return {
+        agent_response: mediaResponse,
+        agent_used: 'mediaClarification',
         needs_human_escalation: false,
         context: inputData,
       };
@@ -978,12 +1181,71 @@ IMPORTANTE:
       };
     }
 
+    // Check for high frustration - automatic escalation
+    const frustrationContext = inputData.frustration_context;
+    if (frustrationContext?.should_escalate) {
+      console.log(`[Step 2] ⚠️ HIGH FRUSTRATION - automatic escalation triggered`);
+      if (logger) {
+        logger.warn(`[Step 2] High frustration escalation - level: ${frustrationContext.frustration_level}, indicators: ${frustrationContext.frustration_indicators.join(', ')}`);
+      }
+
+      // Escalate to human support
+      const escalationResult = await escalate_to_human_tool.execute(
+        {
+          conversation_id: inputData.conversation_id,
+          reason: 'sentiment_negative',
+          context: {
+            team_id: inputData.team_id,
+            customer_phone: inputData.customer_phone,
+            product_id: inputData.product_id,
+            product_name: inputData.product_name,
+            additional_info: `Frustration level: ${frustrationContext.frustration_level}. Indicators: ${frustrationContext.frustration_indicators.join(', ')}. Recommended: ${frustrationContext.recommended_action}`,
+          },
+          priority: 'urgent',
+        },
+        { mastra }
+      ) as { success: boolean; ticket_id: string; escalation_time: string; webhook_called: boolean };
+
+      // Still provide a response acknowledging the frustration
+      const empathyResponse = `Eu entendo sua frustração e peço sinceras desculpas pelo transtorno. 😔 Vou encaminhar seu caso para um de nossos especialistas que vai te ajudar pessoalmente. Você receberá um contato em breve. Obrigado pela paciência. 🙏`;
+
+      return {
+        agent_response: empathyResponse,
+        agent_used: 'frustrationEscalation',
+        needs_human_escalation: true,
+        escalation_reason: `High frustration: ${frustrationContext.frustration_indicators.join(', ')}`,
+        context: inputData,
+      };
+    }
+
     // Usar Deep Agent com network() para roteamento inteligente
     const deepAgent = mastra.getAgent('deepAgent' as any);
 
     console.log(`[Step 2] Invoking Deep Agent network - product: ${inputData.product_name}, intent: ${inputData.intent.interaction_type}, needs_confirmation: ${inputData.needs_confirmation}`);
     if (logger) {
       logger.info(`[Step 2] Invoking Deep Agent network - product: ${inputData.product_name}, intent: ${inputData.intent.interaction_type}`);
+    }
+
+    // Build frustration guidance for prompt
+    let frustrationGuidance = '';
+    if (frustrationContext?.is_frustrated) {
+      frustrationGuidance = `
+⚠️ ALERTA DE FRUSTRAÇÃO - Nível: ${frustrationContext.frustration_level.toUpperCase()}
+Indicadores: ${frustrationContext.frustration_indicators.join(', ')}
+Orientação: ${frustrationContext.recommended_action}
+`;
+    }
+
+    // Build message consolidation guidance
+    let consolidationGuidance = '';
+    const msgConsolidation = requestContext.get('message_consolidation') as any;
+    if (msgConsolidation?.has_pending) {
+      consolidationGuidance = `
+📩 MÚLTIPLAS MENSAGENS - O cliente enviou ${msgConsolidation.pending_count + 1} mensagens consecutivas
+${msgConsolidation.consolidated_context || ''}
+Urgência: ${msgConsolidation.urgency.toUpperCase()}
+${msgConsolidation.should_acknowledge ? 'IMPORTANTE: Reconheça a espera e peça desculpas pelo atraso na resposta.' : ''}
+`;
     }
 
     try {
@@ -994,7 +1256,7 @@ CONTEXTO DO CLIENTE:
 - Preço: ${inputData.enriched_context.product.price}
 - Status: ${inputData.enriched_context.customer_status}
 - Intenção detectada: ${inputData.intent.interaction_type}
-${inputData.needs_confirmation ? '\n⚠️  IMPORTANTE: O sistema detectou que o cliente pode estar perguntando sobre preço, mas não confirmamos 100% que é sobre este produto. Pergunte para confirmar antes de responder.' : ''}
+${frustrationGuidance}${consolidationGuidance}${inputData.needs_confirmation ? '\n⚠️  IMPORTANTE: O sistema detectou que o cliente pode estar perguntando sobre preço, mas não confirmamos 100% que é sobre este produto. Pergunte para confirmar antes de responder.' : ''}
 
 MENSAGEM DO CLIENTE:
 "${inputData.sanitized_message}"
@@ -1025,26 +1287,36 @@ Analise e responda apropriadamente.
           logger.debug(`[Step 2] Network event - type: ${chunk.type}`);
         }
 
-        if (chunk.type === 'agent-execution-event-text-delta') {
-          // Acumular texto (streaming)
-          // The payload is double-nested: chunk.payload.payload contains the actual data
-          const outerPayload = chunk.payload as any;
-          const innerPayload = outerPayload?.payload;
+        // Reset response when a new routing-agent response starts
+        // This prevents duplicating text from both agent-execution and routing-agent
+        if (chunk.type === 'routing-agent-text-start') {
+          response = ''; // Clear previous response, use only routing-agent output
+        }
 
-          // Try different possible field names for the delta text in the inner payload
-          const delta = innerPayload?.delta || innerPayload?.textDelta || innerPayload?.text || innerPayload?.content;
+        // Handle text delta chunks - prefer routing-agent (final response) over agent-execution
+        if (chunk.type === 'routing-agent-text-delta') {
+          const payload = chunk.payload as any;
+          const delta = payload?.textDelta || payload?.delta || payload?.text || payload?.content;
+          if (delta) {
+            response += delta;
+          }
+        }
+        // Only use agent-execution if we haven't started receiving routing-agent text
+        else if (chunk.type === 'agent-execution-event-text-delta' && response === '') {
+          const payload = chunk.payload as any;
+          let delta: string | undefined;
+
+          if (payload?.textDelta) {
+            delta = payload.textDelta;
+          } else if (payload?.payload) {
+            const innerPayload = payload.payload;
+            delta = innerPayload?.delta || innerPayload?.textDelta || innerPayload?.text || innerPayload?.content;
+          } else {
+            delta = payload?.delta || payload?.text || payload?.content;
+          }
 
           if (delta) {
             response += delta;
-            console.log(`[Step 2] Text delta received: ${delta.length} chars, total: ${response.length}`);
-          } else {
-            // Log payload structure to debug
-            console.log(`[Step 2] Text delta chunk but no delta found.`);
-            console.log(`  Outer payload keys:`, Object.keys(outerPayload || {}));
-            console.log(`  Inner payload keys:`, Object.keys(innerPayload || {}));
-            if (innerPayload) {
-              console.log(`  Inner payload sample:`, JSON.stringify(innerPayload).substring(0, 200));
-            }
           }
         }
 
@@ -1069,10 +1341,33 @@ Analise e responda apropriadamente.
           }
         }
 
-        // Log unknown chunk types
-        if (chunk.type !== 'agent-execution-event-text-delta' &&
-            chunk.type !== 'agent-execution-event-step-finish' &&
-            chunk.type !== 'routing-agent-end') {
+        // Only log truly unknown chunk types (for debugging new Mastra versions)
+        const knownChunkTypes = [
+          // Agent execution events
+          'agent-execution-start',
+          'agent-execution-end',
+          'agent-execution-event-start',
+          'agent-execution-event-finish',
+          'agent-execution-event-step-start',
+          'agent-execution-event-step-finish',
+          'agent-execution-event-text-start',
+          'agent-execution-event-text-delta',
+          'agent-execution-event-text-end',
+          'agent-execution-event-reasoning-start',
+          'agent-execution-event-reasoning-end',
+          // Routing agent events
+          'routing-agent-start',
+          'routing-agent-end',
+          'routing-agent-text-start',
+          'routing-agent-text-delta',
+          // Tool execution events
+          'tool-execution-start',
+          'tool-execution-end',
+          // Network events
+          'network-execution-event-step-finish',
+          'network-execution-event-finish',
+        ];
+        if (!knownChunkTypes.includes(chunk.type)) {
           console.log(`[Step 2] Unknown chunk type: ${chunk.type}, has_payload: ${!!chunk.payload}`);
         }
       }
@@ -1257,12 +1552,32 @@ const guardrail_validation_step = createStep({
       }
     }).catch(() => {});
 
+    // Consolidate response to avoid multiple messages
+    const consolidationResult = await response_consolidator.execute(
+      { response: agent_response, max_length: 1000 },
+      { mastra }
+    ) as {
+      consolidated_response: string;
+      was_consolidated: boolean;
+      original_message_count: number;
+      warnings: string[];
+    };
+
+    const finalResponse = consolidationResult.consolidated_response;
+
+    if (consolidationResult.was_consolidated) {
+      console.log(`[Step 3] Response consolidated - messages: ${consolidationResult.original_message_count}, warnings: ${consolidationResult.warnings.join(', ')}`);
+      if (logger) {
+        logger.info(`[Step 3] Response consolidated - original_messages: ${consolidationResult.original_message_count}`);
+      }
+    }
+
     if (logger) {
       logger.info(`[Step 3] Response validated successfully - agent_used: ${agent_used}, issues_count: ${validationIssues.length}`);
     }
 
     return {
-      response: agent_response,
+      response: finalResponse,
       workflow_status: 'success' as const,
       agent_used,
       needs_human: false,

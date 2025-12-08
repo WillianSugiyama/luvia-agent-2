@@ -36,6 +36,7 @@ const greetingHandlerInputSchema = z.object({
   message: z.string(),
   team_id: z.string(),
   customer_phone: z.string().optional(),
+  conversation_history: z.string().optional().describe('Recent conversation history for context'),
 });
 
 const greetingHandlerOutputSchema = z.object({
@@ -53,10 +54,34 @@ interface GreetingAnalysis {
   detected_intent?: string;
 }
 
-async function analyzeMessageWithLLM(message: string): Promise<GreetingAnalysis> {
+async function analyzeMessageWithLLM(message: string, conversationHistory?: string): Promise<GreetingAnalysis> {
   const openai = getOpenAIClient();
 
-  const systemPrompt = `Você é um analisador de mensagens. Sua tarefa é determinar se uma mensagem é:
+  // If there's conversation history, the user is in an ongoing conversation
+  // "olá?", "oii", "pode me ajudar?" in this context are follow-ups, NOT new greetings
+  const hasHistory = conversationHistory && conversationHistory.trim().length > 0;
+
+  const systemPrompt = hasHistory
+    ? `Você é um analisador de mensagens em uma conversa em andamento.
+
+CONTEXTO IMPORTANTE: O usuário JÁ ESTÁ em uma conversa. Mensagens como "olá?", "oii", "oi?", "alguém aí?", "pode me ajudar?" NÃO são saudações novas - são sinais de impaciência ou pedidos de atenção.
+
+HISTÓRICO DA CONVERSA:
+${conversationHistory}
+
+Sua tarefa é determinar se a NOVA mensagem do usuário é:
+1. Um follow-up/cobrança (usuário esperando resposta ou querendo atenção) - NÃO é saudação
+2. Uma mensagem que contém uma pergunta, pedido ou intenção clara
+
+REGRA IMPORTANTE: Se existe histórico de conversa, mensagens curtas como "oi", "olá?", "oii", "e aí?" NÃO são saudações - são cobranças ou pedidos de atenção.
+
+Responda APENAS com um JSON válido no formato:
+{
+  "is_greeting_only": false (SEMPRE false quando há histórico de conversa),
+  "has_question_or_intent": true (SEMPRE true quando há histórico de conversa),
+  "detected_intent": "follow_up" ou descrição da intenção
+}`
+    : `Você é um analisador de mensagens. Sua tarefa é determinar se uma mensagem é:
 1. APENAS uma saudação (sem nenhuma pergunta ou intenção clara)
 2. Uma mensagem que contém uma pergunta, pedido ou intenção clara
 
@@ -103,7 +128,7 @@ Responda APENAS com um JSON válido no formato:
     }
 
     const analysis = JSON.parse(content) as GreetingAnalysis;
-    console.log(`\x1b[36m[GreetingHandler]\x1b[0m LLM Analysis: ${JSON.stringify(analysis)}`);
+    console.log(`\x1b[36m[GreetingHandler]\x1b[0m LLM Analysis: ${JSON.stringify(analysis)} (hasHistory=${hasHistory})`);
     return analysis;
   } catch (error) {
     console.error('[GreetingHandler] LLM analysis failed:', error);
@@ -168,13 +193,13 @@ export const greeting_handler = createTool({
   inputSchema: greetingHandlerInputSchema,
   outputSchema: greetingHandlerOutputSchema,
   execute: async (inputData, context) => {
-    const { message, team_id, customer_phone } = inputData;
+    const { message, team_id, customer_phone, conversation_history } = inputData;
     const logger = context?.mastra?.logger;
 
-    console.log(`\x1b[36m[GreetingHandler]\x1b[0m Analyzing message: "${message}"`);
+    console.log(`\x1b[36m[GreetingHandler]\x1b[0m Analyzing message: "${message}" (has_history=${!!conversation_history})`);
 
-    // Use LLM to analyze the message
-    const analysis = await analyzeMessageWithLLM(message);
+    // Use LLM to analyze the message with conversation history context
+    const analysis = await analyzeMessageWithLLM(message, conversation_history);
 
     // Fetch team data
     const supabase = getSupabaseClient();
@@ -207,13 +232,23 @@ export const greeting_handler = createTool({
     }
 
     // Build personalized greeting
-    // Format: "Olá [Nome]! Aqui é a/o [Agente], em que posso ajudar?"
+    // Check if user asked "tudo bem?" or similar
+    const askedHowAreYou = /(tudo bem|como vai|como está|td bem|blz|beleza)\??/i.test(message);
+
     let response: string;
 
     if (customerName) {
-      response = `Olá ${customerName}! Aqui é ${agentName}, em que posso ajudar?`;
+      if (askedHowAreYou) {
+        response = `Olá ${customerName}! Tudo ótimo por aqui, e com você? 😊 Sou ${agentName}, em que posso te ajudar hoje?`;
+      } else {
+        response = `Olá ${customerName}! Sou ${agentName}, em que posso te ajudar hoje?`;
+      }
     } else {
-      response = `Olá! Aqui é ${agentName}, em que posso te ajudar hoje?`;
+      if (askedHowAreYou) {
+        response = `Olá! Tudo ótimo por aqui, e com você? 😊 Sou ${agentName}, em que posso te ajudar hoje?`;
+      } else {
+        response = `Olá! Sou ${agentName}, em que posso te ajudar hoje?`;
+      }
     }
 
     console.log(`\x1b[32m[GreetingHandler]\x1b[0m Generated response: "${response}"`);

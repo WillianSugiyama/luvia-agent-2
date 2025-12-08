@@ -22,6 +22,7 @@ const productSelectionDetectorInputSchema = z.object({
     product_name: z.string(),
     event_type: z.string(),
   })).describe('List of products shown to the user'),
+  conversation_history: z.string().optional().describe('Recent conversation history for context'),
 });
 
 const productSelectionDetectorOutputSchema = z.object({
@@ -42,7 +43,8 @@ interface SelectionAnalysis {
 
 async function analyzeProductSelection(
   message: string,
-  products: { index: number; product_name: string; event_type: string }[]
+  products: { index: number; product_name: string; event_type: string }[],
+  conversationHistory?: string
 ): Promise<SelectionAnalysis> {
   const openai = getOpenAIClient();
 
@@ -50,8 +52,17 @@ async function analyzeProductSelection(
     .map((p) => `${p.index}. "${p.product_name}" (${p.event_type})`)
     .join('\n');
 
-  const systemPrompt = `Você é um analisador de seleção de produtos. O sistema mostrou uma lista de produtos para o usuário e agora precisa entender a resposta dele.
+  // Build context section if we have conversation history
+  const historySection = conversationHistory
+    ? `\nHISTÓRICO DA CONVERSA (mensagens anteriores):
+${conversationHistory}
 
+CONTEXTO: O usuário pode estar fazendo referência a algo mencionado anteriormente na conversa.
+Se a mensagem parecer uma cobrança/impaciência ("olá?", "oii", "alguém aí?"), considere como follow_up, não como seleção de produto.\n`
+    : '';
+
+  const systemPrompt = `Você é um analisador de seleção de produtos. O sistema mostrou uma lista de produtos para o usuário e agora precisa entender a resposta dele.
+${historySection}
 LISTA DE PRODUTOS MOSTRADA:
 ${productsList}
 
@@ -63,12 +74,15 @@ O usuário pode selecionar de várias formas:
 - Nome completo ou quase completo
 - Referência ao status: "o que eu comprei", "o do carrinho"
 
-Se o usuário NÃO está selecionando um produto (está fazendo uma pergunta nova, cumprimentando, etc.), marque is_selection como false.
+Se o usuário NÃO está selecionando um produto (está fazendo uma pergunta nova, cumprimentando, cobrando resposta, etc.), marque is_selection como false.
 
 IMPORTANTE: O campo "selected_index" deve ser EXATAMENTE o número que aparece no início da linha do produto na lista acima.
 - Se o usuário disse "2" ou "segundo", selected_index deve ser 2 (não 1!)
 - Se o usuário disse "1" ou "primeiro", selected_index deve ser 1 (não 0!)
 - Os índices começam em 1, NÃO em 0!
+
+MENSAGENS DE COBRANÇA/IMPACIÊNCIA:
+- Se a mensagem for "olá?", "oii", "oi?", "pode me ajudar?", "alguém aí?" = is_selection: false, is_new_question: false, detected_intent: "follow_up"
 
 Responda APENAS com JSON válido:
 {
@@ -111,9 +125,9 @@ export const product_selection_detector = createTool({
   inputSchema: productSelectionDetectorInputSchema,
   outputSchema: productSelectionDetectorOutputSchema,
   execute: async (inputData) => {
-    const { message, products } = inputData;
+    const { message, products, conversation_history } = inputData;
 
-    console.log(`\x1b[36m[ProductSelectionDetector]\x1b[0m Analyzing: "${message}" with ${products.length} products`);
+    console.log(`\x1b[36m[ProductSelectionDetector]\x1b[0m Analyzing: "${message}" with ${products.length} products (has_history=${!!conversation_history})`);
 
     if (!products || products.length === 0) {
       return {
@@ -125,7 +139,7 @@ export const product_selection_detector = createTool({
       };
     }
 
-    const analysis = await analyzeProductSelection(message, products);
+    const analysis = await analyzeProductSelection(message, products, conversation_history);
 
     // Validate selected_index is within range
     if (analysis.selected_index !== null) {

@@ -9,6 +9,7 @@ export const inputSchema = z.object({
     .optional(),
   email: z.string().email().optional(),
   user_confirmation: z.boolean().optional(),
+  message_type: z.enum(['text', 'image', 'audio', 'video', 'document', 'sticker', 'unknown']).optional(),
 });
 
 export type InputSchema = z.infer<typeof inputSchema>;

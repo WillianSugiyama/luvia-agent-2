@@ -2,12 +2,20 @@ import { createTool } from '@mastra/core/tools';
 import { Memory } from '@mastra/memory';
 import { LibSQLStore } from '@mastra/libsql';
 import { z } from 'zod';
-import type { ConversationState, ProductHistoryItem, PendingMultiProductSelection } from '../../types/luvia.types';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import type { ConversationState, ProductHistoryItem, PendingMultiProductSelection, ConversationMessage } from '../../types/luvia.types';
+
+// Use absolute path to avoid issues with relative paths in different contexts
+const currentFile = fileURLToPath(import.meta.url);
+const currentDir = dirname(currentFile);
+const dbPath = join(currentDir, '..', '..', '..', 'data', 'memory.db');
+const memoryDbUrl = process.env.LIBSQL_URL || `file:${dbPath}`;
 
 const memory = new Memory({
   storage: new LibSQLStore({
     id: 'conversation-context',
-    url: process.env.LIBSQL_URL || 'file:./data/memory.db',
+    url: memoryDbUrl,
     ...(process.env.LIBSQL_AUTH_TOKEN && { authToken: process.env.LIBSQL_AUTH_TOKEN }),
   }),
   options: {
@@ -95,6 +103,7 @@ const createInitialState = (
   pending_context_switch: null,
   pending_product_confirmation: null,
   pending_multi_product_selection: null,
+  message_history: [],
 });
 
 // Helper: Update purchased products cache
@@ -184,6 +193,49 @@ export const clearPendingMultiProductSelection = async (conversationId: string) 
     state.pending_multi_product_selection = null;
     await saveConversationState(conversationId, state);
   }
+};
+
+// Helper: Append message to conversation history (keeps last 10 messages)
+export const appendMessageToHistory = async (
+  conversationId: string,
+  role: 'user' | 'assistant',
+  content: string
+): Promise<void> => {
+  let state = await loadConversationState(conversationId);
+  if (!state) {
+    state = createInitialState(conversationId, '');
+  }
+
+  const newMessage: ConversationMessage = {
+    role,
+    content,
+    timestamp: Date.now(),
+  };
+
+  // Ensure message_history exists (for backward compatibility with old states)
+  if (!state.message_history) {
+    state.message_history = [];
+  }
+
+  // Keep only the last 10 messages
+  state.message_history = [...state.message_history.slice(-9), newMessage];
+  await saveConversationState(conversationId, state);
+};
+
+// Helper: Get recent conversation history as formatted string
+export const getConversationHistoryString = async (
+  conversationId: string,
+  maxMessages: number = 5
+): Promise<string> => {
+  const state = await loadConversationState(conversationId);
+  if (!state || !state.message_history || state.message_history.length === 0) {
+    return '';
+  }
+
+  const recentMessages = state.message_history.slice(-maxMessages);
+  return recentMessages
+    .map(m => `${m.role === 'user' ? 'Usuário' : 'Assistente'}: ${m.content}`)
+    .join('\n');
 };
 
 // Helper: Clear entire conversation state (reset)

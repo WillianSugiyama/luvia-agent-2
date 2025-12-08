@@ -7,7 +7,7 @@ console.log('[Server] NODE_ENV:', process.env.NODE_ENV);
 console.log('[Server] PORT:', process.env.PORT);
 
 import { mastra } from './mastra/index';
-import { clearConversationState } from './mastra/tools/manage-conversation-context-tool';
+import { clearConversationState, appendMessageToHistory } from './mastra/tools/manage-conversation-context-tool';
 
 console.log('[Server] Mastra loaded successfully');
 
@@ -40,7 +40,7 @@ app.get('/', (_req, res) => {
 
 app.post('/api/chat', async (req, res) => {
   try {
-    const { team_id, message, phone, email, user_confirmation } = req.body ?? {};
+    const { team_id, message, phone, email, user_confirmation, message_type } = req.body ?? {};
 
     if (!team_id || !message) {
       return res.status(400).json({
@@ -58,6 +58,7 @@ app.post('/api/chat', async (req, res) => {
         phone,
         email,
         user_confirmation,
+        message_type,
       },
     });
 
@@ -79,6 +80,16 @@ app.post('/api/chat', async (req, res) => {
     };
 
     console.log('[Server] Sending response:', JSON.stringify(response, null, 2));
+
+    // Save assistant response to conversation history
+    // This ensures we track both user and assistant messages for context
+    const sanitizedPhone = phone ? phone.replace(/\D/g, '') : undefined;
+    const conversationId = sanitizedPhone || email || `team-${team_id}`;
+    const assistantResponse = (result.result as any)?.response;
+    if (assistantResponse) {
+      await appendMessageToHistory(conversationId, 'assistant', assistantResponse);
+      console.log(`[Server] Saved assistant response to history for: ${conversationId}`);
+    }
 
     return res.json(response);
   } catch (err: any) {

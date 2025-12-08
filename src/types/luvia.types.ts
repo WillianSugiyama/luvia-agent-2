@@ -84,6 +84,12 @@ export interface PendingMultiProductSelection {
   timestamp: number;
 }
 
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+}
+
 export interface ConversationState {
   conversation_id: string;
   current_product_id: string | null;
@@ -98,4 +104,7 @@ export interface ConversationState {
   pending_context_switch: PendingContextSwitch | null; // Pending confirmation for context switch
   pending_product_confirmation: PendingProductConfirmation | null; // Pending confirmation for product from history
   pending_multi_product_selection: PendingMultiProductSelection | null; // Pending selection from multi-product list
+
+  // Conversation history for context management
+  message_history: ConversationMessage[];         // Recent messages for context (last 10)
 }

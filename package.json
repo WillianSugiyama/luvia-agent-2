@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "dev": "mastra dev",
     "dev:all": "npx tsx src/server.ts & mastra dev",
     "build": "mastra build",
@@ -31,6 +33,7 @@
     "@supabase/supabase-js": "^2.49.1",
     "ai": "^5.0.102",
     "cohere-ai": "^7.13.2",
+    "csv-parse": "^6.1.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "openai": "^4.77.0",
@@ -39,10 +42,12 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^24.10.1",
+    "@vitest/coverage-v8": "^4.0.15",
     "mastra": "^1.0.0-beta.3",
     "pino-pretty": "^13.1.2",
     "ts-node": "^10.9.2",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.15"
   }
 }
