@@ -564,6 +564,70 @@ const security_and_enrich_step = createStep({
     console.log(`[Step 1] User message: "${safeMessage}"`);
     console.log(`[Step 1] Intent interpreted - type: ${intent.interaction_type}, has_clear_product: ${intent.has_clear_product}, product_name: "${intent.product_name}"`);
 
+    // 4.5. Check for PURE greeting - if user just says "Olá", "Oi", etc., respond with greeting ONLY
+    // Don't ask about products for pure greetings - only ask when user expresses clear intent
+    // Patterns: "Oi", "Olá", "Bom dia", "Olá, tudo bem?", "Oi, como vai?", etc.
+    const greetingOnlyPattern = /^(ol[aá]|oi+|bom dia|boa tarde|boa noite|e a[ií]|opa|hey|hello|hi)[\s,!?.]*((tudo (bem|certo|bom|ótimo)|como vai|como está|blz|beleza)[\s?!]*)?$/i;
+    const isPureGreeting = greetingOnlyPattern.test(safeMessage.trim());
+    if (isPureGreeting) {
+      console.log(`[Step 4.5] Pure greeting detected: "${safeMessage}" - responding with greeting only`);
+
+      // Build personalized greeting response matching user's preferred WhatsApp style
+      const askedHowAreYou = /(tudo bem|como vai|como está|td bem|blz|beleza)\??/i.test(safeMessage);
+      let greetingResponse: string;
+      const customerName = greetingResult.customer_name;
+      const agentName = greetingResult.agent_name || 'Assistente';
+
+      if (customerName) {
+        if (askedHowAreYou) {
+          greetingResponse = `Oiee ${customerName}, tudo ótimo por aqui! E com você? 😊 Aqui é ${agentName}, em que posso te ajudar?`;
+        } else {
+          greetingResponse = `Oiee ${customerName}, tudo bem? 😊 Aqui é ${agentName}, em que posso te ajudar?`;
+        }
+      } else {
+        if (askedHowAreYou) {
+          greetingResponse = `Oiee, tudo ótimo por aqui! E com você? 😊 Aqui é ${agentName}, em que posso te ajudar?`;
+        } else {
+          greetingResponse = `Oiee, tudo bem? 😊 Aqui é ${agentName}, em que posso te ajudar?`;
+        }
+      }
+
+      return {
+        original_message: message,
+        sanitized_message: safeMessage,
+        conversation_id: conversationId,
+        team_id,
+        customer_phone: sanitizedPhone,
+        customer_email: email,
+        product_id: 'greeting-response',
+        product_name: 'Saudação',
+        enriched_context: {
+          product: {
+            name: 'Saudação',
+            price: '',
+            checkout_link: '',
+            description: greetingResponse,
+          },
+          customer_status: 'new',
+          rules: [],
+          sales_strategy: {
+            framework: 'greeting',
+            instruction: greetingResponse,
+            cta_suggested: '',
+            should_offer: false,
+          },
+        },
+        is_ambiguous: false,
+        needs_confirmation: false,
+        intent: {
+          interaction_type: 'greeting',
+          has_clear_product: false,
+          normalized_query: safeMessage,
+        },
+        frustration_context: frustrationResult,
+      };
+    }
+
     // 5. Check Customer Products FIRST (before embedding search)
     let customerProducts: any[] = [];
     let shouldSkipEmbeddingSearch = false;
